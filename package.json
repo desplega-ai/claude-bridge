@@ -1,0 +1,26 @@
+{
+  "name": "claude-tmux-channel",
+  "version": "0.0.1",
+  "description": "POC: drive interactive claude in tmux (Shannon-style) and bridge an in-process channel MCP back to the orchestrator.",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "ctc": "./src/cli.ts"
+  },
+  "scripts": {
+    "start": "bun ./src/cli.ts",
+    "channel": "bun ./src/mcp-channel.ts",
+    "test:smoke": "bun ./src/test-smoke.ts",
+    "test:transcript": "bun ./src/test-transcript.ts",
+    "test": "bun run test:smoke && bun run test:transcript",
+    "typecheck": "bun tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
