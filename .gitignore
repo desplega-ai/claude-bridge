@@ -1,5 +1,4 @@
 node_modules
-bun.lock
 .runs
 *.log
 .claude/settings.local.json
