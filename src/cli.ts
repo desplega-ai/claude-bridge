@@ -589,6 +589,8 @@ const DEV_CHANNEL_DIALOG_RE = /(Loading development channels|Enter to confirm)/i
 const THEME_DIALOG_RE = /(Choose the text style that looks best with your terminal|To change this later, run \/theme)/i;
 const LOGIN_METHOD_DIALOG_RE = /(Select login method|Claude account with subscription)/i;
 const SECURITY_NOTES_DIALOG_RE = /(Security notes:|Press Enter to continue)/i;
+const CHANNELS_UNAVAILABLE_RE =
+  /(Channels are not currently available|--dangerously-load-development-channels ignored)/i;
 
 /**
  * Claude may show first-run selectors before the bridge channel can load:
@@ -653,6 +655,19 @@ async function waitForClaudeReady(): Promise<void> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < CLAUDE_READY_TIMEOUT_MS && !ctrl.signal.aborted) {
     const pane = capturePane();
+    if (CHANNELS_UNAVAILABLE_RE.test(pane)) {
+      const message =
+        "Claude started without channel support. claude-bridge requires Claude Code channels; the current Claude auth/session reports channels unavailable.";
+      desplegaDebug("claude channels unavailable", {
+        tail: pane.split("\n").slice(-20).join("\n"),
+      });
+      if (printMode) {
+        failPrint(message);
+      } else {
+        stdoutLine({ type: "bridge_warning", message });
+      }
+      return;
+    }
     if (isClaudePaneReady(pane)) {
       claudeReady = true;
       desplegaDebug("claude pane ready");

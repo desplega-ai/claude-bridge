@@ -382,7 +382,12 @@ bun ./src/cli.ts -p "Return exactly a JSON object with resp set to ok." \
 ```
 
 If the secret is not available, the live smoke is skipped while the
-deterministic job still runs.
+deterministic job still runs. If Claude accepts the token only for inference
+and reports that channels are unavailable, the job emits a notice and skips the
+live bridge assertion. That keeps CI honest: the bridge path still requires a
+full channel-capable Claude Code session, while deterministic tests continue to
+cover argument parsing, schema validation, hook installation, and wrapper
+formatting.
 
 ## Layout
 
