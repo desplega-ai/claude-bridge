@@ -518,6 +518,8 @@ function startTmux(): void {
     ...forwardedClaudeArgs,
   ];
   const envArgs = [
+    "-u",
+    "CLAUDE_CODE_OAUTH_TOKEN",
     ...claudeAuthEnvArgs(),
     ...(jsonSchemaPath
       ? [
@@ -566,7 +568,6 @@ function claudeAuthEnvArgs(): string[] {
   const names = [
     "HOME",
     "CLAUDE_CONFIG_DIR",
-    "CLAUDE_CODE_OAUTH_TOKEN",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
