@@ -29,10 +29,13 @@ the parent over the socket. The orchestrator does three things in parallel:
 The orchestrator also pre-clears the prompts that would otherwise block
 Claude's UI:
 
-  - `~/.claude.json` is edited so `projects[<workdir>].hasTrustDialogAccepted`,
+  - Claude's global config is edited so
+    `projects[<workdir>].hasTrustDialogAccepted`,
     `hasCompletedProjectOnboarding`, and `approvedMcprcServers` include our
-    bridge. The previous file is backed up alongside it as
-    `~/.claude.json.claude-bridge-backup`.
+    bridge. This is `~/.claude.json` by default, or
+    `$CLAUDE_CONFIG_DIR/.claude.json` when `CLAUDE_CONFIG_DIR` is set. The
+    previous file is backed up alongside it as
+    `.claude.json.claude-bridge-backup`.
   - A per-workdir `.claude/settings.local.json` sets
     `defaultMode: "bypassPermissions"` and
     `skipDangerousModePermissionPrompt: true`.
@@ -388,7 +391,7 @@ deterministic job still runs.
   capability and a `reply` tool, bridged to the orchestrator over the socket).
 - `src/bridge.ts` — newline-delimited JSON framing for the socket.
 - `src/transcript.ts` — Shannon-style transcript discovery + poll-and-tail.
-- `src/preaccept.ts` — pre-writes `~/.claude.json` trust entry +
+- `src/preaccept.ts` — pre-writes Claude's global trust entry +
   `.claude/settings.local.json` to suppress trust / MCP-approval prompts.
 - `src/hook-install.ts` and `src/stop-hook.ts` — install and execute the
   schema-only global Stop hook.

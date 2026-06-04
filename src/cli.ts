@@ -4,7 +4,7 @@
  *
  *  - Starts a Unix-socket server for the in-process channel MCP.
  *  - Writes a per-run workdir with .mcp.json + .claude/settings.local.json.
- *  - Pre-accepts the trust + MCP-approval prompts in ~/.claude.json.
+ *  - Pre-accepts the trust + MCP-approval prompts in Claude's global config.
  *  - Spawns `claude` inside a detached tmux session with channels enabled.
  *  - Watches the tmux pane for the dev-channels confirmation and answers `y`.
  *  - Tails the on-disk JSONL transcript (Shannon-style). Piped consumers get
