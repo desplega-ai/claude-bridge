@@ -241,6 +241,7 @@ export function formatWrapperHelp(): string {
     "  -p, --print                     Non-interactive mode; exit after the reply",
     "  --output-format <format>        Output: text, json, or stream-json",
     "  --json-schema <schema|file>     Extract and validate final JSON in print mode",
+    "  --desplega-format               Use bridge JSON envelopes in json modes",
     "  --desplega-verbose              Emit extra wrapper debug output",
     "  --desplega-cwd <path>           Run Claude in this cwd (default: current cwd)",
     "  --desplega-local-auth           Forward local Anthropic auth env vars",

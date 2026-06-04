@@ -27,7 +27,7 @@ jobs:
         run: bun run typecheck
 
   live-smoke:
-    name: Claude bridge live smoke matrix (${{ matrix.output_format }}, schema=${{ matrix.json_schema }})
+    name: Claude bridge live smoke matrix (${{ matrix.output_format }}, schema=${{ matrix.json_schema }}, desplega=${{ matrix.desplega_format }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -40,6 +40,21 @@ jobs:
         json_schema:
           - "false"
           - "true"
+        desplega_format:
+          - "false"
+        include:
+          - output_format: json
+            json_schema: "false"
+            desplega_format: "true"
+          - output_format: json
+            json_schema: "true"
+            desplega_format: "true"
+          - output_format: stream-json
+            json_schema: "false"
+            desplega_format: "true"
+          - output_format: stream-json
+            json_schema: "true"
+            desplega_format: "true"
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -116,6 +131,7 @@ jobs:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           CLAUDE_BRIDGE_SMOKE_OUTPUT_FORMAT: ${{ matrix.output_format }}
           CLAUDE_BRIDGE_SMOKE_SCHEMA: ${{ matrix.json_schema }}
+          CLAUDE_BRIDGE_SMOKE_DESPLEGA_FORMAT: ${{ matrix.desplega_format }}
         run: |
           set -euo pipefail
           token="$(

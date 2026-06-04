@@ -15,6 +15,10 @@ type BridgeResult = {
   raw_response?: string;
   structured_output?: unknown;
 };
+type TranscriptRow = Record<string, unknown> & {
+  type?: string;
+  message?: { content?: unknown };
+};
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..");
@@ -23,6 +27,7 @@ if (!existsSync(REPO)) fail(`Repository path does not exist: ${REPO}`);
 const OUTPUT_FORMATS = new Set<OutputFormat>(["text", "json", "stream-json"]);
 const schema = truthy(process.env.CLAUDE_BRIDGE_SMOKE_SCHEMA);
 const localAuth = truthy(process.env.CLAUDE_BRIDGE_SMOKE_LOCAL_AUTH);
+const desplegaFormat = truthy(process.env.CLAUDE_BRIDGE_SMOKE_DESPLEGA_FORMAT);
 const outputFormat = (process.env.CLAUDE_BRIDGE_SMOKE_OUTPUT_FORMAT ?? "text") as OutputFormat;
 const model = process.env.CLAUDE_BRIDGE_SMOKE_MODEL ?? "sonnet";
 const timeoutMs = envInt("CLAUDE_BRIDGE_SMOKE_TIMEOUT_MS", 300_000);
@@ -50,6 +55,7 @@ const prompt = schema
 const args = [
   "./src/cli.ts",
   "--desplega-verbose",
+  ...(desplegaFormat ? ["--desplega-format"] : []),
   ...(localAuth ? ["--desplega-local-auth"] : []),
   "-p",
   prompt,
@@ -92,7 +98,9 @@ env.CLAUDE_BRIDGE_CLAUDE_READY_TIMEOUT_MS =
 env.CLAUDE_BRIDGE_TMUX_SUBMIT_DELAY_MS =
   process.env.CLAUDE_BRIDGE_TMUX_SUBMIT_DELAY_MS ?? "1000";
 
-console.log(`bridge live smoke: output_format=${outputFormat} schema=${schema} model=${model} local_auth=${localAuth}`);
+console.log(
+  `bridge live smoke: output_format=${outputFormat} schema=${schema} model=${model} local_auth=${localAuth} desplega_format=${desplegaFormat}`
+);
 
 const run = spawnSync("bun", args, {
   cwd: REPO,
@@ -127,7 +135,12 @@ function validateSmoke(stdout: string): void {
     return;
   }
 
-  const result = outputFormat === "json" ? parseJsonResult(stdout) : parseStreamResult(stdout);
+  if (outputFormat === "stream-json" && !desplegaFormat) {
+    validateRawTranscriptStream(stdout);
+    return;
+  }
+
+  const result = outputFormat === "json" ? parseJsonResult(stdout) : parseBridgeStreamResult(stdout);
   if (result.is_error) {
     throw new Error(
       [
@@ -181,7 +194,7 @@ function parseJsonResult(stdout: string): BridgeResult {
   return parsed;
 }
 
-function parseStreamResult(stdout: string): BridgeResult {
+function parseBridgeStreamResult(stdout: string): BridgeResult {
   const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
   if (lines.length === 0) throw new Error("Expected stream-json output, got empty stdout.");
 
@@ -194,6 +207,47 @@ function parseStreamResult(stdout: string): BridgeResult {
     throw new Error(`Expected final stream-json result event, got ${lines.length} JSONL lines.`);
   }
   return final;
+}
+
+function validateRawTranscriptStream(stdout: string): void {
+  const rows = parseTranscriptRows(stdout);
+  const bridgeEnvelope = rows.find(row => row.type === "transcript" && "row" in row);
+  if (bridgeEnvelope) {
+    throw new Error("Expected raw Claude transcript rows, got a bridge transcript envelope.");
+  }
+  const assistantText = rows
+    .filter(row => row.type === "assistant")
+    .map(row => textFromContent(row.message?.content).trim())
+    .filter(Boolean)
+    .at(-1);
+  if (!assistantText) throw new Error("Expected an assistant transcript row in stream-json output.");
+
+  if (schema) {
+    validateStructuredOutput(JSON.parse(assistantText));
+    return;
+  }
+  if (!assistantText.toLowerCase().includes("bridge-ok")) {
+    throw new Error(`Expected assistant transcript text to include bridge-ok, got: ${JSON.stringify(assistantText)}`);
+  }
+}
+
+function parseTranscriptRows(stdout: string): TranscriptRow[] {
+  const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
+  if (lines.length === 0) throw new Error("Expected stream-json transcript rows, got empty stdout.");
+  return lines.map(line => JSON.parse(line) as TranscriptRow);
+}
+
+function textFromContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map(part => {
+      if (!part || typeof part !== "object") return "";
+      const block = part as Record<string, unknown>;
+      return block.type === "text" ? String(block.text ?? "") : "";
+    })
+    .filter(Boolean)
+    .join("\n");
 }
 
 function dumpFailure(reason: string, stdout: string, stderr: string): never {

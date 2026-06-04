@@ -48,6 +48,10 @@ ok("strips desplega args from Claude args", desplega.claudeArgs.join(" ") === "-
 ok("sets desplega verbose", desplega.desplegaVerbose);
 ok("keeps reserved desplega args typed", desplega.desplegaArgs.length === 2 && desplega.desplegaArgs[1]?.value === "debug");
 
+const desplegaFormat = expectOk(["--desplega-format", "-p", "say hi", "--output-format", "stream-json"]);
+ok("desplega format parses", desplegaFormat.desplegaArgs.some(arg => arg.name === "format" && arg.value === true));
+ok("desplega format is not forwarded", desplegaFormat.claudeArgs.length === 0);
+
 const cwdSpace = expectOk(["--desplega-cwd", "/tmp", "--model", "sonnet"]);
 ok("desplega cwd accepts separate value", cwdSpace.desplegaArgs.find(arg => arg.name === "cwd")?.value === "/tmp");
 ok("desplega cwd is not forwarded", cwdSpace.claudeArgs.join(" ") === "--model sonnet");
@@ -97,6 +101,7 @@ const help = expectOk(["--help"]);
 ok("--help is handled by wrapper", help.help);
 ok("help text includes print mode", formatWrapperHelp().includes("-p, --print"));
 ok("help text includes json schema", formatWrapperHelp().includes("--json-schema"));
+ok("help text includes desplega format", formatWrapperHelp().includes("--desplega-format"));
 ok("help text includes desplega cwd", formatWrapperHelp().includes("--desplega-cwd"));
 ok("help text includes local auth", formatWrapperHelp().includes("--desplega-local-auth"));
 ok("help text includes hook install", formatWrapperHelp().includes("--desplega-install"));

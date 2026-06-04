@@ -80,6 +80,7 @@ const desplegaArgs = args.desplegaArgs;
 const desplegaVerbose = args.desplegaVerbose;
 const printMode = args.print;
 const outputFormat: OutputFormat = args.outputFormat;
+const desplegaFormat = hasDesplegaFlag("format");
 
 if (hasDesplegaFlag("internal-json-schema-stop-hook")) {
   await runJsonSchemaStopHook();
@@ -170,6 +171,8 @@ const inputPrompt = isTTY ? "> " : "";
 const debugEvents: Record<string, unknown>[] = [];
 let transcriptSessionId: string | undefined;
 let lastAssistantText = "";
+let lastAssistantRow: TranscriptRow | null = null;
+let lastTurnDurationMs: number | undefined;
 let printDone = false;
 let printReadyTimer: ReturnType<typeof setTimeout> | null = null;
 let printReplyTimer: ReturnType<typeof setTimeout> | null = null;
@@ -177,7 +180,9 @@ let printReplyTimer: ReturnType<typeof setTimeout> | null = null;
 let rlRef: import("node:readline").Interface | null = null;
 const stdoutLine = (obj: Record<string, unknown>): void => {
   if (printMode) {
-    if (outputFormat === "stream-json") process.stdout.write(JSON.stringify(obj) + "\n");
+    if (outputFormat === "stream-json" && desplegaFormat) {
+      process.stdout.write(JSON.stringify(obj) + "\n");
+    }
     return;
   }
 
@@ -202,11 +207,11 @@ const stdoutLine = (obj: Record<string, unknown>): void => {
 const desplegaDebug = (message: string, data?: Record<string, unknown>): void => {
   if (!desplegaVerbose) return;
   const event = { type: "desplega_debug", message, ...(data ? { data } : {}) };
-  if (printMode && outputFormat === "json") {
+  if (printMode && outputFormat === "json" && desplegaFormat) {
     debugEvents.push(event);
     return;
   }
-  if (printMode && outputFormat === "stream-json") {
+  if (printMode && outputFormat === "stream-json" && desplegaFormat) {
     stdoutLine(event);
     return;
   }
@@ -301,7 +306,7 @@ function desplegaValue(name: string): boolean | string | undefined {
 }
 
 function failBeforeRun(message: string): never {
-  if (printMode && outputFormat !== "text") {
+  if (printMode && outputFormat !== "text" && desplegaFormat) {
     process.stdout.write(
       JSON.stringify({ type: "result", subtype: "error", is_error: true, error: message }) + "\n"
     );
@@ -426,7 +431,7 @@ function finishPrintResult(resultText: string): void {
   if (outputFormat === "text") {
     const text = structured ? JSON.stringify(structured.value) : resultText;
     process.stdout.write(text.endsWith("\n") ? text : text + "\n");
-  } else {
+  } else if (desplegaFormat) {
     const result = {
       type: "result",
       subtype: "success",
@@ -439,8 +444,32 @@ function finishPrintResult(resultText: string): void {
       ...(outputFormat === "json" && debugEvents.length ? { debug: debugEvents } : {}),
     };
     process.stdout.write(JSON.stringify(result) + "\n");
+  } else if (outputFormat === "json") {
+    process.stdout.write(JSON.stringify(makeClaudeCompatResult(resultText, structured)) + "\n");
   }
   shutdown();
+}
+
+function makeClaudeCompatResult(
+  resultText: string,
+  structured: { ok: true; value: unknown; source: string } | null
+): Record<string, unknown> {
+  return {
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: resultText,
+    ...(structured ? { structured_output: structured.value } : {}),
+    ...(transcriptSessionId ? { session_id: transcriptSessionId } : {}),
+    ...(lastTurnDurationMs !== undefined ? { duration_ms: lastTurnDurationMs } : {}),
+    num_turns: 1,
+    ...(lastAssistantUsage() ? { usage: lastAssistantUsage() } : {}),
+  };
+}
+
+function lastAssistantUsage(): unknown {
+  const msg = (lastAssistantRow?.message as Record<string, unknown> | undefined) ?? undefined;
+  return msg?.usage;
 }
 
 function extractStructuredOutput(
@@ -505,13 +534,24 @@ function failPrint(message: string, details: { rawResponse?: string } = {}): voi
     if (details.rawResponse !== undefined) {
       process.stderr.write(`Raw Claude reply:\n${details.rawResponse}\n`);
     }
-  } else {
+  } else if (desplegaFormat) {
     const result = makePrintErrorResult(message, {
       rawResponse: details.rawResponse,
       sessionId: transcriptSessionId,
       debug: outputFormat === "json" ? debugEvents : undefined,
     });
     process.stdout.write(JSON.stringify(result) + "\n");
+  } else {
+    process.stdout.write(
+      JSON.stringify({
+        type: "result",
+        subtype: "error",
+        is_error: true,
+        error: message,
+        ...(details.rawResponse !== undefined ? { raw_response: details.rawResponse } : {}),
+        ...(transcriptSessionId ? { session_id: transcriptSessionId } : {}),
+      }) + "\n"
+    );
   }
   shutdown(1);
 }
@@ -733,12 +773,17 @@ async function startTranscriptTail(): Promise<void> {
   stdoutLine({ type: "transcript_open", path: transcriptPath, session_id: sessionId });
   await tailTranscript(
     transcriptPath,
-    (row: TranscriptRow) => handleTranscriptRow(row),
+    (row: TranscriptRow, _index: number, rawLine: string) => handleTranscriptRow(row, rawLine),
     ctrl.signal
   );
 }
 
-function handleTranscriptRow(row: TranscriptRow): void {
+function handleTranscriptRow(row: TranscriptRow, rawLine: string): void {
+  if (printMode && printDone) return;
+  if (printMode && outputFormat === "stream-json" && !desplegaFormat) {
+    process.stdout.write(rawLine.endsWith("\n") ? rawLine : rawLine + "\n");
+  }
+
   stdoutLine({ type: "transcript", row });
 
   if (!printMode) return;
@@ -747,11 +792,15 @@ function handleTranscriptRow(row: TranscriptRow): void {
   if (type === "assistant") {
     const msg = (row.message as Record<string, unknown> | undefined) ?? {};
     const text = textFromContent(msg.content).trim();
-    if (text) lastAssistantText = text;
+    if (text) {
+      lastAssistantText = text;
+      lastAssistantRow = row;
+    }
     return;
   }
 
   if (type === "system" && row.subtype === "turn_duration") {
+    if (typeof row.durationMs === "number") lastTurnDurationMs = row.durationMs;
     if (!lastAssistantText) {
       failPrint("Claude reached turn end without assistant text.", {
         rawResponse: lastAssistantText,

@@ -20,9 +20,10 @@ bunx @desplega.ai/claude-bridge -p "say hi" --output-format json
 ```
 
 The transcript source is the same JSONL file Claude writes under
-`~/.claude/projects/<slug>/<session-uuid>.jsonl`. Piped consumers get bridge
-envelopes; TTY users get a compact readable view. The transcript tailing follows
-the [Shannon](https://github.com/dexhorthy/shannon) technique: snapshot the
+`~/.claude/projects/<slug>/<session-uuid>.jsonl`. Outside print mode, piped
+consumers get bridge envelopes and TTY users get a compact readable view. The
+transcript tailing follows the
+[Shannon](https://github.com/dexhorthy/shannon) technique: snapshot the
 pre-existing `*.jsonl` set before launch, poll for a fresh file, and
 poll-and-reparse it every 100 ms.
 
@@ -74,6 +75,7 @@ Run without installing:
 bunx @desplega.ai/claude-bridge -p "say hi"
 bunx @desplega.ai/claude-bridge -p "say hi" --output-format json
 bunx @desplega.ai/claude-bridge -p "say hi" --output-format stream-json
+bunx @desplega.ai/claude-bridge -p "say hi" --output-format stream-json --desplega-format
 ```
 
 Install globally with Bun:
@@ -112,11 +114,10 @@ claude -p "say hi" --output-format json
 claude-bridge -p "say hi" --output-format json
 ```
 
-This is drop-in compatibility for common `claude -p` automation, not a
-byte-for-byte clone of every Claude CLI mode. In print mode the wrapper starts
-an interactive Claude session in tmux, waits for the pane to become ready,
-sends the prompt through tmux, prints the requested format, then kills the tmux
-session.
+This is intended as a drop-in replacement for common `claude -p` automation.
+In print mode the wrapper starts an interactive Claude session in tmux, waits
+for the pane to become ready, sends the prompt through tmux, prints the
+requested format, then kills the tmux session.
 
 ## Auth
 
@@ -179,13 +180,23 @@ turn.
 
 - `text`: prints only the final answer text plus a trailing newline. Wrapper
   errors go to stderr and exit non-zero.
-- `json`: prints one final JSON object. Success looks like
-  `{"type":"result","subtype":"success","is_error":false,"result":"..."}` and
-  may include `session_id` when available. Errors use `subtype:"error"`,
-  `is_error:true`, and an `error` string.
-- `stream-json`: prints newline-delimited bridge events as the run progresses,
-  then a final `result` event. This is a custom `claude-bridge` event stream,
-  not Claude's native `stream-json` schema.
+- `json`: prints one final Claude-compatible JSON result object with the
+  answer in `result`, plus available transcript metadata such as `session_id`,
+  `duration_ms`, and `usage`.
+- `stream-json`: streams raw Claude transcript JSONL rows as they are written.
+  The bridge does not wrap them in custom envelopes.
+
+Use `--desplega-format` when you want the older bridge-owned JSON envelopes in
+`json` or `stream-json` modes:
+
+```sh
+claude-bridge -p "say hi" --output-format stream-json --desplega-format
+```
+
+With `--desplega-format`, `json` includes bridge debug metadata when
+`--desplega-verbose` is set, and `stream-json` prints newline-delimited bridge
+events as the run progresses, then a final `result` event. This is a custom
+`claude-bridge` event stream, not Claude's native `stream-json` schema.
 
 Typical `stream-json` event types are:
 
@@ -197,9 +208,9 @@ Typical `stream-json` event types are:
 {"type":"result","subtype":"success","is_error":false,"result":"Hi.","session_id":"..."}
 ```
 
-For `transcript` events, `row` is the raw parsed Claude transcript JSONL row.
-If you think of the event as a path, that raw Claude data lives at
-`transcript.row`; consumers should switch on the outer bridge `type` first.
+These custom `transcript` events only exist with `--desplega-format`. In the
+default compatibility mode, the same Claude data is written as the top-level
+JSONL row.
 
 ## Structured JSON
 
@@ -252,9 +263,10 @@ support instead of maintaining a handwritten validator here. If Zod cannot
 convert the schema, the wrapper treats that as a print-mode error.
 
 With `--output-format text`, successful schema mode prints the extracted JSON
-value as compact JSON. With `json` or `stream-json`, the final result includes
-`structured_output` and `structured_output_source` alongside the original
-reply text in `result`.
+value as compact JSON. With `--output-format json`, the final result includes
+`structured_output` alongside the original reply text in `result`. With
+`--desplega-format`, bridge JSON results also include
+`structured_output_source`.
 
 If schema extraction or validation fails after Claude replies, `json` and
 `stream-json` error results include `raw_response` with the unmodified Claude

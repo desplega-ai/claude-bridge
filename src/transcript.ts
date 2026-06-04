@@ -129,8 +129,13 @@ export async function waitForFreshTranscriptForCwd(
 }
 
 export type TranscriptRow = Record<string, unknown> & { type?: string };
+type TranscriptEntry = { row: TranscriptRow; line: string };
 
 export async function readTranscript(transcriptPath: string): Promise<TranscriptRow[]> {
+  return (await readTranscriptEntries(transcriptPath)).map(entry => entry.row);
+}
+
+async function readTranscriptEntries(transcriptPath: string): Promise<TranscriptEntry[]> {
   const file = Bun.file(transcriptPath);
   if (!(await file.exists())) return [];
   const text = await file.text();
@@ -139,23 +144,27 @@ export async function readTranscript(transcriptPath: string): Promise<Transcript
     .filter(Boolean)
     .map(line => {
       try {
-        return JSON.parse(line) as TranscriptRow;
+        return { row: JSON.parse(line) as TranscriptRow, line };
       } catch {
-        return { type: "bridge_parse_error", line };
+        return { row: { type: "bridge_parse_error", line }, line };
       }
     });
 }
 
 export async function tailTranscript(
   transcriptPath: string,
-  onRow: (row: TranscriptRow, index: number) => void,
+  onRow: (row: TranscriptRow, index: number, rawLine: string) => void,
   signal: AbortSignal
 ): Promise<void> {
   let emitted = 0;
   while (!signal.aborted) {
-    const rows = await readTranscript(transcriptPath);
-    for (let i = emitted; i < rows.length; i++) onRow(rows[i]!, i);
-    if (rows.length > emitted) emitted = rows.length;
+    const entries = await readTranscriptEntries(transcriptPath);
+    for (let i = emitted; i < entries.length; i++) {
+      const entry = entries[i]!;
+      onRow(entry.row, i, entry.line);
+      if (signal.aborted) break;
+    }
+    if (entries.length > emitted) emitted = entries.length;
     await sleep(POLL_MS);
   }
 }
