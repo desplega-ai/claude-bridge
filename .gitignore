@@ -1,4 +1,5 @@
 node_modules
 .runs
+.claude-bridge
 *.log
 .claude/settings.local.json

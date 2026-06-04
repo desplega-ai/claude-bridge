@@ -45,6 +45,7 @@ import {
 } from "./hook-install.ts";
 import { makePrintErrorResult } from "./print-result.ts";
 import { runJsonSchemaStopHook } from "./stop-hook.ts";
+import { buildClaudeLaunchCommand } from "./launch-command.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..");
@@ -128,10 +129,11 @@ const forwardedClaudeArgs = jsonSchema
   : args.claudeArgs;
 
 const runId = new Date().toISOString().replace(/[:.]/g, "-") + "-" + randomUUID().slice(0, 8);
-const runDir = join(REPO, ".runs", runId);
+const runDir = join(resolveRunRoot(targetCwd), runId);
 mkdirSync(runDir, { recursive: true });
 
 const jsonSchemaPath = jsonSchema ? join(runDir, "json-schema.json") : undefined;
+const claudeExitStatusPath = join(runDir, "claude-exit-status");
 const sessionName = `claude-bridge-${runId.slice(-8)}`;
 const PRINT_READY_TIMEOUT_MS = envDurationMs(
   "CLAUDE_BRIDGE_PRINT_READY_TIMEOUT_MS",
@@ -140,6 +142,7 @@ const PRINT_READY_TIMEOUT_MS = envDurationMs(
 const PRINT_REPLY_TIMEOUT_MS = envDurationMs("CLAUDE_BRIDGE_PRINT_REPLY_TIMEOUT_MS", 10 * 60_000);
 const CLAUDE_READY_TIMEOUT_MS = envDurationMs("CLAUDE_BRIDGE_CLAUDE_READY_TIMEOUT_MS", 180_000);
 const TMUX_SUBMIT_DELAY_MS = envDurationMs("CLAUDE_BRIDGE_TMUX_SUBMIT_DELAY_MS", 1_000);
+const TMUX_EXIT_HOLD_MS = envDurationMs("CLAUDE_BRIDGE_TMUX_EXIT_HOLD_MS", 30_000);
 
 if (jsonSchemaPath && jsonSchema) {
   writeFileSync(jsonSchemaPath, jsonSchema.compact + "\n");
@@ -148,6 +151,15 @@ if (jsonSchemaPath && jsonSchema) {
 
 preAcceptProject({ workdir: targetCwd, mcpServerNames: [] });
 writeWorkdirSettings(targetCwd);
+
+const tmuxPath = resolveRequiredCommand(
+  "tmux",
+  "Required command `tmux` was not found on PATH. Install tmux on this host before running claude-bridge."
+);
+const claudePath = resolveRequiredCommand(
+  "claude",
+  "Required command `claude` was not found on PATH. Install Claude Code on this host, or make sure PATH includes it before running claude-bridge."
+);
 
 const ctrl = new AbortController();
 const isTTY = !!process.stdout.isTTY && !printMode;
@@ -271,6 +283,12 @@ function resolveTargetCwd(): string {
   return resolved;
 }
 
+function resolveRunRoot(cwd: string): string {
+  const value = desplegaValue("run-dir") ?? desplegaValue("state-dir");
+  if (value !== undefined && value !== true) return resolve(process.cwd(), String(value));
+  return join(cwd, ".claude-bridge", "runs");
+}
+
 function hasDesplegaFlag(name: string): boolean {
   const arg = desplegaArgs.find(arg => arg.name === name);
   return Boolean(arg && arg.value !== false);
@@ -289,6 +307,17 @@ function failBeforeRun(message: string): never {
     process.stderr.write(`claude-bridge: ${message}\n`);
   }
   process.exit(2);
+}
+
+function commandPath(command: string): string | null {
+  const res = spawnSync("which", [command], { encoding: "utf8" });
+  if (res.status !== 0) return null;
+  const first = res.stdout.trim().split(/\r?\n/)[0];
+  return first || null;
+}
+
+function resolveRequiredCommand(command: string, message: string): string {
+  return commandPath(command) ?? failBeforeRun(message);
 }
 
 let claudeReady = false;
@@ -314,7 +343,7 @@ function sendUserMessage(text: string): string | null {
 
 function sendPromptToTmux(text: string, id: string): boolean {
   const bufferName = `claude-bridge-${id}`;
-  const load = spawnSync("tmux", ["load-buffer", "-b", bufferName, "-"], {
+  const load = spawnSync(tmuxPath, ["load-buffer", "-b", bufferName, "-"], {
     input: text,
     encoding: "utf8",
   });
@@ -322,7 +351,7 @@ function sendPromptToTmux(text: string, id: string): boolean {
     return failTmuxSend("load prompt buffer", load);
   }
 
-  const paste = spawnSync("tmux", ["paste-buffer", "-d", "-b", bufferName, "-t", sessionName], {
+  const paste = spawnSync(tmuxPath, ["paste-buffer", "-d", "-b", bufferName, "-t", sessionName], {
     encoding: "utf8",
   });
   if (paste.status !== 0) {
@@ -330,7 +359,7 @@ function sendPromptToTmux(text: string, id: string): boolean {
   }
 
   sleepSync(TMUX_SUBMIT_DELAY_MS);
-  const enter = spawnSync("tmux", ["send-keys", "-t", sessionName, "Enter"], {
+  const enter = spawnSync(tmuxPath, ["send-keys", "-t", sessionName, "Enter"], {
     encoding: "utf8",
   });
   if (enter.status !== 0) {
@@ -500,7 +529,15 @@ function startTmux(): void {
         ]
       : []),
   ];
-  desplegaDebug("starting claude in tmux", { sessionName, claudeArgs });
+  const launchCommand = buildClaudeLaunchCommand({
+    claudePath,
+    claudeArgs,
+    unsetEnvArgs: claudeUnsetEnvArgs(),
+    envArgs,
+    exitStatusPath: claudeExitStatusPath,
+    holdMs: TMUX_EXIT_HOLD_MS,
+  });
+  desplegaDebug("starting claude in tmux", { sessionName, claudePath, claudeArgs });
   const newSession = [
     "new-session",
     "-d",
@@ -512,13 +549,9 @@ function startTmux(): void {
     "50",
     "-c",
     targetCwd,
-    "env",
-    ...claudeUnsetEnvArgs(),
-    ...envArgs,
-    "claude",
-    ...claudeArgs,
+    launchCommand,
   ];
-  const res = spawnSync("tmux", newSession, { stdio: "inherit" });
+  const res = spawnSync(tmuxPath, newSession, { stdio: "inherit" });
   if (res.status !== 0) {
     process.stderr.write(`[claude-bridge] tmux new-session exited ${res.status}\n`);
     process.exit(1);
@@ -530,7 +563,7 @@ function startTmux(): void {
 }
 
 function capturePane(): string {
-  const r = spawnSync("tmux", ["capture-pane", "-pt", sessionName, "-S", "-80"], {
+  const r = spawnSync(tmuxPath, ["capture-pane", "-pt", sessionName, "-S", "-80"], {
     encoding: "utf8",
   });
   return (r.stdout ?? "") + (r.stderr ?? "");
@@ -572,9 +605,9 @@ async function autoAcceptStartupPrompts(): Promise<void> {
     const prompt = startupPromptFromPane(pane);
     if (prompt && Date.now() - lastFire > 600) {
       if (prompt === "custom-api-key") {
-        spawnSync("tmux", ["send-keys", "-t", sessionName, "Up", "Enter"]);
+        spawnSync(tmuxPath, ["send-keys", "-t", sessionName, "Up", "Enter"]);
       } else {
-        spawnSync("tmux", ["send-keys", "-t", sessionName, "Enter"]);
+        spawnSync(tmuxPath, ["send-keys", "-t", sessionName, "Enter"]);
       }
       lastFire = Date.now();
       fires++;
@@ -608,6 +641,15 @@ async function waitForClaudeReady(): Promise<void> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < CLAUDE_READY_TIMEOUT_MS && !ctrl.signal.aborted) {
     const pane = capturePane();
+    const exitStatus = readClaudeExitStatus();
+    if (exitStatus !== null) {
+      failClaudeStartup(exitStatus, pane);
+      return;
+    }
+    if (!tmuxSessionExists()) {
+      failClaudeStartup(null, pane);
+      return;
+    }
     if (isClaudePaneReady(pane)) {
       claudeReady = true;
       clearPrintReadyTimer();
@@ -624,6 +666,36 @@ async function waitForClaudeReady(): Promise<void> {
     failPrint(message);
   } else {
     stdoutLine({ type: "bridge_warning", message });
+  }
+}
+
+function readClaudeExitStatus(): string | null {
+  if (!existsSync(claudeExitStatusPath)) return null;
+  return readFileSync(claudeExitStatusPath, "utf8").trim() || "unknown";
+}
+
+function tmuxSessionExists(): boolean {
+  const res = spawnSync(tmuxPath, ["has-session", "-t", sessionName], {
+    stdio: "ignore",
+  });
+  return res.status === 0;
+}
+
+function failClaudeStartup(exitStatus: string | null, pane: string): void {
+  const statusText = exitStatus === null ? "the tmux session exited" : `Claude exited with status ${exitStatus}`;
+  const paneTail = pane.trim() ? pane.split("\n").slice(-20).join("\n") : "";
+  const message = `${statusText} before Claude became ready. Run state: ${runDir}. Check \`${claudePath} -v\` and Claude auth on this host.`;
+  if (printMode) {
+    failPrint(paneTail ? `${message}\nPane tail:\n${paneTail}` : message);
+  } else {
+    stdoutLine({
+      type: "bridge_error",
+      where: "claude-startup",
+      message,
+      run_state: runDir,
+      pane_tail: paneTail || undefined,
+    });
+    shutdown(1);
   }
 }
 
@@ -748,7 +820,7 @@ function shutdown(exitCode = 0): void {
   shuttingDown = true;
   clearPrintTimers();
   ctrl.abort();
-  spawn("tmux", ["kill-session", "-t", sessionName], { stdio: "ignore" }).on("exit", () =>
+  spawn(tmuxPath, ["kill-session", "-t", sessionName], { stdio: "ignore" }).on("exit", () =>
     process.exit(exitCode)
   );
   setTimeout(() => process.exit(exitCode), 1500);

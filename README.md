@@ -311,7 +311,7 @@ The CLI prints a banner with the tmux session name and run state path:
 ```
    tmux session : claude-bridge-2026abcd
    cwd          : /path/to/current/project
-   run state    : .runs/2026-05-15T.../
+   run state    : /path/to/current/project/.claude-bridge/runs/2026-05-15T.../
 
    attach to the Claude UI in another terminal:
      tmux attach -t claude-bridge-2026abcd
@@ -506,7 +506,8 @@ to localhost binding unless explicitly exposed.
   `.claude/settings.local.json` to suppress trust and permission prompts.
 - `src/hook-install.ts` and `src/stop-hook.ts` — install and execute the
   schema-only global Stop hook.
-- Each run writes its run state and schema copy under `.runs/<id>/`.
+- Each run writes its run state and schema copy under
+  `.claude-bridge/runs/<id>/` in the target cwd.
 
 ## Optional channel protocol
 
