@@ -22,24 +22,20 @@ git switch master
 git pull --ff-only
 git switch -c release/vX.Y.Z
 
-npm version --no-git-tag-version X.Y.Z
-bun install
-
-bun run test
-bun run typecheck
-npm pack --dry-run --json
-
-git add package.json bun.lock
-git commit -m "Release vX.Y.Z"
+bun run release patch
 git push -u origin release/vX.Y.Z
 ```
 
 Open a PR, wait for CI, and merge it into `master`. The release workflow runs
 from the merge commit when `package.json`'s `version` changed.
 
-For patch/minor/major bumps, `npm version --no-git-tag-version patch` and the
-corresponding `minor` or `major` forms are fine. Keep `--no-git-tag-version`;
-the workflow owns tag creation.
+The release helper accepts `patch`, `minor`, `major`, `prepatch`, `preminor`,
+`premajor`, `prerelease`, or an explicit version like `1.2.3`. It runs tests,
+typecheck, and `npm pack --dry-run --json`, then commits `Release vX.Y.Z`.
+
+Use `--no-verify` only when you already ran the same checks in the current
+working tree. Keep version tagging out of local commands; the workflow owns tag
+creation.
 
 ## What The Workflow Does
 
