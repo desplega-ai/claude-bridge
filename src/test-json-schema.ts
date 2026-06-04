@@ -49,7 +49,7 @@ ok(
 
 const schemaPrompt = makeJsonSchemaSystemPrompt(inline.compact);
 ok("schema prompt includes compact schema", schemaPrompt.includes(inline.compact));
-ok("schema prompt asks for bridge reply tool", schemaPrompt.includes("mcp__bridge__reply"));
+ok("schema prompt asks for final assistant JSON", schemaPrompt.includes("final assistant reply"));
 ok("schema prompt uses critical block", schemaPrompt.includes('<critical when="before replying to the user">'));
 
 const mergedSeparate = mergeAppendSystemPrompt(

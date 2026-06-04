@@ -2,11 +2,10 @@
 /**
  * claude-bridge CLI.
  *
- *  - Starts a Unix-socket server for the in-process channel MCP.
- *  - Writes a per-run workdir with .mcp.json + .claude/settings.local.json.
- *  - Pre-accepts the trust + MCP-approval prompts in Claude's global config.
- *  - Spawns `claude` inside a detached tmux session with channels enabled.
- *  - Watches the tmux pane for the dev-channels confirmation and answers `y`.
+ *  - Writes a per-run workdir and .claude/settings.local.json.
+ *  - Pre-accepts trust and onboarding prompts in Claude's global config.
+ *  - Spawns `claude` inside a detached tmux session.
+ *  - Sends prompts through tmux and reads results from Claude's transcript.
  *  - Tails the on-disk JSONL transcript (Shannon-style). Piped consumers get
  *    JSONL envelopes; TTY users get a compact readable view.
  *
@@ -14,13 +13,11 @@
  *     tmux attach -t <session-name>
  */
 import { spawn, spawnSync } from "node:child_process";
-import { createServer, type Server as NetServer, type Socket } from "node:net";
 import { createInterface } from "node:readline";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
-import { onLines, send, type Envelope } from "./bridge.ts";
 import { preAcceptProject, writeWorkdirSettings } from "./preaccept.ts";
 import {
   listAllTranscriptPaths,
@@ -50,8 +47,6 @@ import { runJsonSchemaStopHook } from "./stop-hook.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..");
-const MCP_ENTRY = join(HERE, "mcp-channel.ts");
-const channelName = "bridge";
 
 const parsedArgs = parseCliArgs(process.argv.slice(2));
 if (!parsedArgs.ok) {
@@ -135,38 +130,22 @@ const runId = new Date().toISOString().replace(/[:.]/g, "-") + "-" + randomUUID(
 const runDir = join(REPO, ".runs", runId);
 mkdirSync(runDir, { recursive: true });
 
-const sockPath = join(runDir, "bridge.sock");
-const mcpConfigPath = join(runDir, ".mcp.json");
 const jsonSchemaPath = jsonSchema ? join(runDir, "json-schema.json") : undefined;
 const sessionName = `claude-bridge-${runId.slice(-8)}`;
-const PRINT_CHANNEL_TIMEOUT_MS = envDurationMs("CLAUDE_BRIDGE_PRINT_CHANNEL_TIMEOUT_MS", 180_000);
+const PRINT_READY_TIMEOUT_MS = envDurationMs(
+  "CLAUDE_BRIDGE_PRINT_READY_TIMEOUT_MS",
+  envDurationMs("CLAUDE_BRIDGE_PRINT_CHANNEL_TIMEOUT_MS", 180_000)
+);
 const PRINT_REPLY_TIMEOUT_MS = envDurationMs("CLAUDE_BRIDGE_PRINT_REPLY_TIMEOUT_MS", 10 * 60_000);
 const CLAUDE_READY_TIMEOUT_MS = envDurationMs("CLAUDE_BRIDGE_CLAUDE_READY_TIMEOUT_MS", 180_000);
-
-// .mcp.json sets the env Claude will pass to the channel subprocess.
-writeFileSync(
-  mcpConfigPath,
-  JSON.stringify(
-    {
-      mcpServers: {
-        [channelName]: {
-          command: "bun",
-          args: [MCP_ENTRY],
-          env: { CLAUDE_BRIDGE_SOCK: sockPath, CLAUDE_BRIDGE_CHANNEL_NAME: channelName },
-        },
-      },
-    },
-    null,
-    2
-  )
-);
+const TMUX_SUBMIT_DELAY_MS = envDurationMs("CLAUDE_BRIDGE_TMUX_SUBMIT_DELAY_MS", 250);
 
 if (jsonSchemaPath && jsonSchema) {
   writeFileSync(jsonSchemaPath, jsonSchema.compact + "\n");
   installJsonSchemaStopHook({ command: buildJsonSchemaStopHookCommand() });
 }
 
-preAcceptProject({ workdir: targetCwd, mcpServerNames: [channelName] });
+preAcceptProject({ workdir: targetCwd, mcpServerNames: [] });
 writeWorkdirSettings(targetCwd);
 
 const ctrl = new AbortController();
@@ -176,10 +155,8 @@ const inputPrompt = isTTY ? "> " : "";
 const debugEvents: Record<string, unknown>[] = [];
 let transcriptSessionId: string | undefined;
 let lastAssistantText = "";
-let lastBridgeReplyText = "";
-let lastBridgeReplyChatId: string | undefined;
 let printDone = false;
-let printChannelTimer: ReturnType<typeof setTimeout> | null = null;
+let printReadyTimer: ReturnType<typeof setTimeout> | null = null;
 let printReplyTimer: ReturnType<typeof setTimeout> | null = null;
 
 let rlRef: import("node:readline").Interface | null = null;
@@ -313,74 +290,73 @@ function failBeforeRun(message: string): never {
   process.exit(2);
 }
 
-let channelSock: Socket | null = null;
-let channelReady = false;
 let claudeReady = false;
-let printChatId: string | null = null;
 const pendingMessages: string[] = initialMessage ? [initialMessage] : [];
 
-const server: NetServer = createServer(sock => {
-  if (channelSock) {
-    if (!printMode) process.stderr.write("[claude-bridge] second channel connection rejected\n");
-    sock.end();
-    return;
-  }
-  channelSock = sock;
-  onLines(sock, env => handleFromChannel(env));
-  sock.on("close", () => {
-    if (!printMode) process.stderr.write("[claude-bridge] channel mcp disconnected\n");
-    channelSock = null;
-    channelReady = false;
-  });
-});
-
-server.listen(sockPath, () => {
-  if (!printMode) process.stderr.write(`[claude-bridge] socket: ${sockPath}\n`);
-  desplegaDebug("server listening", { socket: sockPath, runDir });
-  startPrintChannelTimer();
-  startTmux();
-  if (!printMode) startRepl();
-});
-
-function handleFromChannel(env: Envelope): void {
-  if (env.kind === "hello") {
-    channelReady = true;
-    clearPrintChannelTimer();
-    if (!printMode) process.stderr.write("[claude-bridge] channel mcp connected\n");
-    stdoutLine({ type: "channel_hello", pid: env.pid, channel: env.channel });
-    if (!flushPendingMessages()) promptIfReady();
-    return;
-  }
-  if (env.kind === "reply") {
-    stdoutLine({ type: "reply", chat_id: env.chat_id, text: env.text });
-    if (printMode && env.chat_id === printChatId) {
-      if (jsonSchema) {
-        lastBridgeReplyText = env.text;
-        lastBridgeReplyChatId = env.chat_id;
-        return;
-      }
-      finishPrintReply(env);
-    }
-    return;
-  }
-}
-
 function sendUserMessage(text: string): string | null {
-  if (!channelSock || !channelReady || !claudeReady) {
+  if (!claudeReady) {
     pendingMessages.push(text);
-    desplegaDebug("queued message before bridge readiness", {
+    desplegaDebug("queued message before Claude readiness", {
       length: text.length,
-      channelReady,
       claudeReady,
     });
     return null;
   }
 
   const id = randomUUID().slice(0, 8);
-  send(channelSock, { kind: "push", id, content: text });
-  stdoutLine({ type: "push", id, content: text });
+  const sent = sendPromptToTmux(text, id);
+  if (!sent) return null;
+  stdoutLine({ type: "push", id, content: text, transport: "tmux" });
   if (printMode && !printReplyTimer) startPrintReplyTimer();
   return id;
+}
+
+function sendPromptToTmux(text: string, id: string): boolean {
+  const bufferName = `claude-bridge-${id}`;
+  const load = spawnSync("tmux", ["load-buffer", "-b", bufferName, "-"], {
+    input: text,
+    encoding: "utf8",
+  });
+  if (load.status !== 0) {
+    return failTmuxSend("load prompt buffer", load);
+  }
+
+  const paste = spawnSync("tmux", ["paste-buffer", "-d", "-b", bufferName, "-t", sessionName], {
+    encoding: "utf8",
+  });
+  if (paste.status !== 0) {
+    return failTmuxSend("paste prompt buffer", paste);
+  }
+
+  sleepSync(TMUX_SUBMIT_DELAY_MS);
+  const enter = spawnSync("tmux", ["send-keys", "-t", sessionName, "Enter"], {
+    encoding: "utf8",
+  });
+  if (enter.status !== 0) {
+    return failTmuxSend("submit prompt", enter);
+  }
+
+  desplegaDebug("sent prompt through tmux", { id, length: text.length });
+  return true;
+}
+
+function failTmuxSend(
+  action: string,
+  result: { status: number | null; stderr?: unknown }
+): false {
+  const message = `Failed to ${action} with tmux.`;
+  const stderr = String(result.stderr ?? "").trim();
+  desplegaDebug("tmux send failure", { action, status: result.status, stderr });
+  if (printMode) {
+    failPrint(stderr ? `${message} ${stderr}` : message);
+  } else {
+    stdoutLine({
+      type: "bridge_error",
+      where: "tmux-send",
+      message: stderr ? `${message} ${stderr}` : message,
+    });
+  }
+  return false;
 }
 
 function flushPendingMessages(): boolean {
@@ -391,20 +367,21 @@ function flushPendingMessages(): boolean {
     const id = sendUserMessage(text);
     if (!id) break;
     sent = true;
-    if (printMode && !printChatId) printChatId = id;
   }
   return sent;
 }
 
 function promptIfReady(): void {
-  if (!printMode && channelReady && claudeReady && isTTY) rlRef?.prompt();
+  if (!printMode && claudeReady && isTTY) rlRef?.prompt();
 }
 
-function finishPrintReply(env: Extract<Envelope, { kind: "reply" }>): void {
-  finishPrintResult(env.text, env.chat_id);
+function sleepSync(ms: number): void {
+  const sab = new SharedArrayBuffer(4);
+  const int32 = new Int32Array(sab);
+  Atomics.wait(int32, 0, 0, ms);
 }
 
-function finishPrintResult(resultText: string, chatId?: string): void {
+function finishPrintResult(resultText: string): void {
   if (printDone) return;
   const structured = extractStructuredOutput(resultText);
   if (structured && !structured.ok) {
@@ -426,7 +403,6 @@ function finishPrintResult(resultText: string, chatId?: string): void {
       ...(structured
         ? { structured_output: structured.value, structured_output_source: structured.source }
         : {}),
-      ...(chatId ? { chat_id: chatId } : {}),
       ...(transcriptSessionId ? { session_id: transcriptSessionId } : {}),
       ...(outputFormat === "json" && debugEvents.length ? { debug: debugEvents } : {}),
     };
@@ -445,13 +421,13 @@ function extractStructuredOutput(
   return extractAndValidateStructuredOutput(text, jsonSchema.schema);
 }
 
-function startPrintChannelTimer(): void {
-  if (!printMode || printChannelTimer) return;
-  printChannelTimer = setTimeout(() => {
+function startPrintReadyTimer(): void {
+  if (!printMode || printReadyTimer) return;
+  printReadyTimer = setTimeout(() => {
     failPrint(
-      `Timed out after ${PRINT_CHANNEL_TIMEOUT_MS / 1000}s waiting for the Claude channel to connect.`
+      `Timed out after ${PRINT_READY_TIMEOUT_MS / 1000}s waiting for Claude to become ready.`
     );
-  }, PRINT_CHANNEL_TIMEOUT_MS);
+  }, PRINT_READY_TIMEOUT_MS);
 }
 
 function startPrintReplyTimer(): void {
@@ -463,10 +439,10 @@ function startPrintReplyTimer(): void {
   }, PRINT_REPLY_TIMEOUT_MS);
 }
 
-function clearPrintChannelTimer(): void {
-  if (!printChannelTimer) return;
-  clearTimeout(printChannelTimer);
-  printChannelTimer = null;
+function clearPrintReadyTimer(): void {
+  if (!printReadyTimer) return;
+  clearTimeout(printReadyTimer);
+  printReadyTimer = null;
 }
 
 function clearPrintReplyTimer(): void {
@@ -476,7 +452,7 @@ function clearPrintReplyTimer(): void {
 }
 
 function clearPrintTimers(): void {
-  clearPrintChannelTimer();
+  clearPrintReadyTimer();
   clearPrintReplyTimer();
 }
 
@@ -511,15 +487,9 @@ function failPrint(message: string, details: { rawResponse?: string } = {}): voi
 function startTmux(): void {
   const claudeArgs = [
     "--dangerously-skip-permissions",
-    "--dangerously-load-development-channels",
-    `server:${channelName}`,
-    "--mcp-config",
-    mcpConfigPath,
     ...forwardedClaudeArgs,
   ];
   const envArgs = [
-    "-u",
-    "CLAUDE_CODE_OAUTH_TOKEN",
     ...claudeAuthEnvArgs(),
     ...(jsonSchemaPath
       ? [
@@ -568,6 +538,7 @@ function claudeAuthEnvArgs(): string[] {
   const names = [
     "HOME",
     "CLAUDE_CONFIG_DIR",
+    "CLAUDE_CODE_OAUTH_TOKEN",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
@@ -583,23 +554,19 @@ function claudeAuthEnvArgs(): string[] {
 }
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
-const DEV_CHANNEL_DIALOG_RE = /(Loading development channels|Enter to confirm)/i;
 const THEME_DIALOG_RE = /(Choose the text style that looks best with your terminal|To change this later, run \/theme)/i;
 const SECURITY_NOTES_DIALOG_RE = /(Security notes:|Press Enter to continue)/i;
-const CHANNELS_UNAVAILABLE_RE =
-  /(Channels are not currently available|--dangerously-load-development-channels ignored)/i;
+const CLAUDE_INPUT_PROMPT_RE = /(^|\n)\s*(?:❯|>)[^\n]*(?:\n|$)/;
 
 /**
- * Claude may show first-run selectors before the bridge channel can load:
+ * Claude may show first-run selectors before the input prompt is available:
  *
  *   1. Theme selection on a fresh config directory.
- *   2. Login-method selection when an OAuth token is already available.
- *   3. Security notes on first authenticated startup.
- *   4. Development-channel confirmation for our channel MCP.
+ *   2. Security notes on first authenticated startup.
  *
- * These dialogs have a safe default pre-selected for bridge usage, so Enter
- * accepts the default. Keep watching because a fresh CI runner can show theme,
- * auth selection, and dev-channel prompts in sequence.
+ * These dialogs have safe defaults for bridge usage, so Enter accepts them.
+ * Login-method selection is deliberately not handled here because accepting the
+ * wrong row can launch browser auth on local machines.
  */
 async function autoAcceptStartupPrompts(): Promise<void> {
   const t0 = Date.now();
@@ -640,10 +607,9 @@ async function autoAcceptStartupPrompts(): Promise<void> {
 
 function startupPromptFromPane(
   pane: string
-): "theme" | "security-notes" | "dev-channel" | null {
+): "theme" | "security-notes" | null {
   if (THEME_DIALOG_RE.test(pane)) return "theme";
   if (SECURITY_NOTES_DIALOG_RE.test(pane)) return "security-notes";
-  if (DEV_CHANNEL_DIALOG_RE.test(pane)) return "dev-channel";
   return null;
 }
 
@@ -651,21 +617,9 @@ async function waitForClaudeReady(): Promise<void> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < CLAUDE_READY_TIMEOUT_MS && !ctrl.signal.aborted) {
     const pane = capturePane();
-    if (CHANNELS_UNAVAILABLE_RE.test(pane)) {
-      const message =
-        "Claude started without channel support. claude-bridge requires Claude Code channels; the current Claude auth/session reports channels unavailable.";
-      desplegaDebug("claude channels unavailable", {
-        tail: pane.split("\n").slice(-20).join("\n"),
-      });
-      if (printMode) {
-        failPrint(message);
-      } else {
-        stdoutLine({ type: "bridge_warning", message });
-      }
-      return;
-    }
     if (isClaudePaneReady(pane)) {
       claudeReady = true;
+      clearPrintReadyTimer();
       desplegaDebug("claude pane ready");
       if (!flushPendingMessages()) promptIfReady();
       return;
@@ -684,9 +638,8 @@ async function waitForClaudeReady(): Promise<void> {
 
 function isClaudePaneReady(pane: string): boolean {
   return (
-    !DEV_CHANNEL_DIALOG_RE.test(pane) &&
-    /Channels \(experimental\)/.test(pane) &&
-    /(-- INSERT --|❯)/.test(pane)
+    /bypass permissions on/i.test(pane) &&
+    (CLAUDE_INPUT_PROMPT_RE.test(pane) || /-- INSERT --/.test(pane))
   );
 }
 
@@ -695,6 +648,10 @@ async function startTranscriptTail(): Promise<void> {
   try {
     transcriptPath = await waitForFreshTranscriptForCwd(targetCwd, transcriptsBefore, ctrl.signal);
   } catch (err) {
+    if (printMode) {
+      failPrint((err as Error).message);
+      return;
+    }
     stdoutLine({
       type: "bridge_error",
       where: "transcript-discovery",
@@ -728,14 +685,13 @@ function handleTranscriptRow(row: TranscriptRow): void {
   }
 
   if (type === "system" && row.subtype === "turn_duration") {
-    if (jsonSchema && !lastBridgeReplyText) {
-      failPrint("Claude reached turn end without sending a bridge reply.", {
+    if (!lastAssistantText) {
+      failPrint("Claude reached turn end without assistant text.", {
         rawResponse: lastAssistantText,
       });
       return;
     }
-    const resultText = lastBridgeReplyText || lastAssistantText;
-    finishPrintResult(resultText, lastBridgeReplyChatId);
+    finishPrintResult(lastAssistantText);
   }
 }
 
@@ -760,13 +716,12 @@ function printBanner(): void {
       `   tmux session : ${sessionName}`,
       `   cwd          : ${targetCwd}`,
       `   run state    : ${runDir}`,
-      `   socket       : ${sockPath}`,
       "",
       `   attach to the Claude UI in another terminal:`,
       `     tmux attach -t ${sessionName}`,
       "",
-      `   Type a message + Enter on stdin to push a channel event.`,
-      `   Replies and useful transcript rows print below.`,
+      `   Type a message + Enter on stdin to send it to Claude.`,
+      `   Assistant and useful transcript rows print below.`,
       `   Use --desplega-verbose for raw transcript rows and wrapper debug.`,
       `   Ctrl-D to quit (kills the tmux session).`,
       "",
@@ -802,12 +757,13 @@ function shutdown(exitCode = 0): void {
   shuttingDown = true;
   clearPrintTimers();
   ctrl.abort();
-  try {
-    if (channelSock) channelSock.end();
-    server.close();
-  } catch {}
   spawn("tmux", ["kill-session", "-t", sessionName], { stdio: "ignore" }).on("exit", () =>
     process.exit(exitCode)
   );
   setTimeout(() => process.exit(exitCode), 1500);
 }
+
+desplegaDebug("run state created", { runDir });
+startPrintReadyTimer();
+startTmux();
+if (!printMode) startRepl();

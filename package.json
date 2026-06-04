@@ -1,7 +1,7 @@
 {
   "name": "claude-bridge",
   "version": "0.0.1",
-  "description": "Bridge Claude Code's interactive session through a channel MCP and tmux wrapper.",
+  "description": "Bridge Claude Code's interactive session through tmux and transcript output.",
   "private": true,
   "type": "module",
   "author": {

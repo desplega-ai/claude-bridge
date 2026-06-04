@@ -95,7 +95,7 @@ export function loadJsonSchemaFromText(rawText: string, maxTokens: number): Load
 export function makeJsonSchemaSystemPrompt(compactSchema: string): string {
   return [
     '<critical when="before replying to the user">',
-    "For bridge channel input, call mcp__bridge__reply with the channel id as chat_id. Its text must end with valid JSON matching this schema. No prose after JSON.",
+    "Your final assistant reply must end with valid JSON matching this schema. No prose after the JSON.",
     compactSchema,
     "</critical>",
   ].join("\n");

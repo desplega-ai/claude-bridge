@@ -59,7 +59,7 @@ const BLOCKED_OPTIONS = new Map<string, { label: string; reason: string }>([
     "--replay-user-messages",
     {
       label: "--replay-user-messages",
-      reason: "replay mode is not supported through the channel wrapper.",
+      reason: "replay mode is not supported through this wrapper.",
     },
   ],
 ]);
@@ -234,7 +234,7 @@ export function formatWrapperHelp(): string {
   const lines = [
     "Usage: claude-bridge [wrapper options] [claude options] [prompt]",
     "",
-    "Starts Claude Code inside the channel/tmux orchestrator. Normal Claude",
+    "Starts Claude Code inside the tmux/transcript orchestrator. Normal Claude",
     "interactive options are forwarded as-is.",
     "",
     "Wrapper options:",
@@ -260,7 +260,7 @@ export function formatWrapperHelp(): string {
     "",
     "Most Claude interactive options are forwarded. Use `--claude-help` when",
     "you need the raw Claude help, but remember this wrapper owns print/output",
-    "mode, schema extraction, tmux, workdir, and channel delivery.",
+    "mode, schema extraction, tmux, workdir, and prompt delivery.",
   ];
 
   return lines.join("\n") + "\n";
@@ -269,7 +269,7 @@ export function formatWrapperHelp(): string {
 export function formatClaudeHelp(claudeHelp: string): string {
   return [
     "Raw Claude help follows. Note: claude-bridge owns -p/--print, --output-format,",
-    "--json-schema, --tmux, --worktree, and channel delivery; use `claude <cmd>`",
+    "--json-schema, --tmux, --worktree, and prompt delivery; use `claude <cmd>`",
     "directly for Claude subcommands.",
     "",
     claudeHelp.trimEnd(),

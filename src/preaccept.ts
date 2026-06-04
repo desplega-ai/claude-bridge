@@ -6,13 +6,11 @@
  *        hasCompletedProjectOnboarding = true in Claude's global config file.
  *        That is ~/.claude.json by default, or $CLAUDE_CONFIG_DIR/.claude.json
  *        when CLAUDE_CONFIG_DIR is set.
- *   2. The .mcp.json server approval prompt
- *      → add the bridge server to projects[<workdir>].approvedMcprcServers
+ *   2. Optional .mcp.json server approvals
+ *      → add any requested server names to projects[<workdir>].approvedMcprcServers.
  *
- * The dev-channels confirmation prompt (--dangerously-load-development-channels)
- * is NOT persisted in the global config — it has to be answered live. We
- * handle that separately by watching the tmux pane for its marker text and
- * sending `y<Enter>` via tmux send-keys. See cli.ts:autoAcceptStartupPrompts.
+ * Live startup prompts such as theme and security notes are handled by watching
+ * the tmux pane for marker text and sending Enter. See cli.ts:autoAcceptStartupPrompts.
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from "node:fs";
 import { homedir } from "node:os";

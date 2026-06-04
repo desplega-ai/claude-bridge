@@ -51,9 +51,8 @@ export function evaluateJsonSchemaStopHook(
   return {
     decision: "block",
     reason: [
-      `${SCHEMA_STOP_FEEDBACK_MARKER}: call mcp__bridge__reply now.`,
-      "Set chat_id to the latest <channel id>.",
-      "Set text to only valid JSON matching the provided JSON Schema; no normal assistant text.",
+      `${SCHEMA_STOP_FEEDBACK_MARKER}: reply again with valid JSON matching the provided JSON Schema.`,
+      "No prose after the JSON.",
     ].join(" "),
   };
 }
@@ -68,16 +67,22 @@ function parseHookInput(inputText: string): StopHookInput | null {
 
 function collectCandidateReplies(input: StopHookInput): string[] {
   const candidates: string[] = [];
-  const transcriptReply = input.transcript_path ? latestBridgeReplyFromTranscript(input.transcript_path) : null;
+  const transcriptReply = input.transcript_path
+    ? latestAssistantTextFromTranscript(input.transcript_path)
+    : null;
   if (transcriptReply) candidates.push(transcriptReply);
+  if (input.last_assistant_message) candidates.push(input.last_assistant_message);
   return candidates;
 }
 
-function latestBridgeReplyFromTranscript(transcriptPath: string): string | null {
+function latestAssistantTextFromTranscript(transcriptPath: string): string | null {
   try {
     const rows = readTranscriptRows(transcriptPath);
     for (let i = rows.length - 1; i >= 0; i--) {
-      const text = bridgeReplyTextFromRow(rows[i]!);
+      if (rows[i]?.type !== "assistant") continue;
+      const text = textFromMessageContent(
+        (rows[i]!.message as Record<string, unknown> | undefined)?.content
+      ).trim();
       if (text) return text;
     }
   } catch {
@@ -103,28 +108,6 @@ function readTranscriptRows(transcriptPath: string): Record<string, unknown>[] {
     .split("\n")
     .filter(Boolean)
     .map(line => JSON.parse(line) as Record<string, unknown>);
-}
-
-function bridgeReplyTextFromRow(row: Record<string, unknown>): string | null {
-  const message = row.message as Record<string, unknown> | undefined;
-  const content = message?.content;
-  if (!Array.isArray(content)) return null;
-
-  for (let i = content.length - 1; i >= 0; i--) {
-    const part = content[i];
-    if (!part || typeof part !== "object") continue;
-    const block = part as Record<string, unknown>;
-    const input = block.input as Record<string, unknown> | undefined;
-    if (
-      block.type === "tool_use" &&
-      block.name === "mcp__bridge__reply" &&
-      typeof input?.text === "string"
-    ) {
-      return input.text;
-    }
-  }
-
-  return null;
 }
 
 function textFromMessageContent(content: unknown): string {

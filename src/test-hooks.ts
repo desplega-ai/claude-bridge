@@ -98,7 +98,6 @@ const stopInput = (transcriptPath: string, extra: Record<string, unknown> = {}) 
   JSON.stringify({
     hook_event_name: "Stop",
     transcript_path: transcriptPath,
-    last_assistant_message: '{"resp":"assistant-only"}',
     ...extra,
   });
 
@@ -108,38 +107,44 @@ const noEnvDecision = evaluateJsonSchemaStopHook(
 );
 ok("stop hook no-ops outside bridge schema sessions", noEnvDecision === null);
 
-const noBridgeTranscript = join(workdir, "no-bridge.jsonl");
+const assistantOnlyTranscript = join(workdir, "assistant-only.jsonl");
 writeFileSync(
-  noBridgeTranscript,
-  JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: '{"resp":"ok"}' }] } }) + "\n"
+  assistantOnlyTranscript,
+  assistantRow('{"resp":"ok"}') + "\n"
 );
-const noBridgeDecision = evaluateJsonSchemaStopHook(stopInput(noBridgeTranscript), env);
-ok("stop hook requires bridge reply instead of assistant fallback", noBridgeDecision?.decision === "block");
+const assistantOnlyDecision = evaluateJsonSchemaStopHook(stopInput(assistantOnlyTranscript), env);
+ok("stop hook allows valid assistant transcript text", assistantOnlyDecision === null);
 
 const activeDecision = evaluateJsonSchemaStopHook(
-  stopInput(noBridgeTranscript, { stop_hook_active: true }),
+  stopInput(assistantOnlyTranscript, { stop_hook_active: true, last_assistant_message: "not json" }),
   env
 );
-ok("stop hook still blocks active schema continuations", activeDecision?.decision === "block");
+ok("stop hook allows valid transcript during active schema continuations", activeDecision === null);
+
+const assistantMessageDecision = evaluateJsonSchemaStopHook(
+  stopInput(join(workdir, "missing-transcript.jsonl"), { last_assistant_message: '{"resp":"ok"}' }),
+  env
+);
+ok("stop hook allows valid last assistant message", assistantMessageDecision === null);
 
 const validTranscript = join(workdir, "valid.jsonl");
-writeFileSync(validTranscript, bridgeReplyRow('{"resp":"ok"}') + "\n");
+writeFileSync(validTranscript, assistantRow('{"resp":"ok"}') + "\n");
 const validDecision = evaluateJsonSchemaStopHook(stopInput(validTranscript), env);
-ok("stop hook allows valid bridge reply", validDecision === null);
+ok("stop hook allows valid final assistant text", validDecision === null);
 
 const invalidTranscript = join(workdir, "invalid.jsonl");
-writeFileSync(invalidTranscript, bridgeReplyRow("not json") + "\n");
+writeFileSync(invalidTranscript, assistantRow("not json") + "\n");
 const invalidDecision = evaluateJsonSchemaStopHook(stopInput(invalidTranscript), env);
-ok("stop hook blocks invalid bridge reply", invalidDecision?.decision === "block");
-ok("stop hook reason asks for bridge reply", invalidDecision?.reason.includes("mcp__bridge__reply") === true);
+ok("stop hook blocks invalid final assistant text", invalidDecision?.decision === "block");
+ok("stop hook reason asks for valid JSON", invalidDecision?.reason.includes("valid JSON") === true);
 
 const latestWinsTranscript = join(workdir, "latest-wins.jsonl");
 writeFileSync(
   latestWinsTranscript,
-  bridgeReplyRow('{"resp":"ok"}') + "\n" + bridgeReplyRow('{"resp":123}') + "\n"
+  assistantRow('{"resp":"ok"}') + "\n" + assistantRow('{"resp":123}') + "\n"
 );
 const latestWinsDecision = evaluateJsonSchemaStopHook(stopInput(latestWinsTranscript), env);
-ok("stop hook validates latest bridge reply", latestWinsDecision?.decision === "block");
+ok("stop hook validates latest assistant text", latestWinsDecision?.decision === "block");
 
 const maxedTranscript = join(workdir, "maxed.jsonl");
 writeFileSync(
@@ -148,7 +153,7 @@ writeFileSync(
     stopFeedbackRow(),
     stopFeedbackRow(),
     stopFeedbackRow(),
-    bridgeReplyRow("not json"),
+    assistantRow("not json"),
   ].join("\n") + "\n"
 );
 const maxedDecision = evaluateJsonSchemaStopHook(stopInput(maxedTranscript), env);
@@ -159,17 +164,11 @@ try { rmSync(workdir, { recursive: true, force: true }); } catch {}
 console.log("\nresult: " + (process.exitCode ? "FAIL" : "PASS"));
 process.exit(process.exitCode ?? 0);
 
-function bridgeReplyRow(text: string): string {
+function assistantRow(text: string): string {
   return JSON.stringify({
     type: "assistant",
     message: {
-      content: [
-        {
-          type: "tool_use",
-          name: "mcp__bridge__reply",
-          input: { chat_id: "abc123", text },
-        },
-      ],
+      content: [{ type: "text", text }],
     },
   });
 }
@@ -199,7 +198,7 @@ function stopFeedbackRow(): string {
     message: {
       role: "user",
       content:
-        "Stop hook feedback:\nclaude-bridge schema output required: call mcp__bridge__reply now.",
+        "Stop hook feedback:\nclaude-bridge schema output required: reply again with valid JSON.",
     },
   });
 }

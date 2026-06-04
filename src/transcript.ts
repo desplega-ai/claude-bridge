@@ -14,8 +14,8 @@ import { homedir } from "node:os";
 import { readdir } from "node:fs/promises";
 
 export const POLL_MS = 100;
-// Generous because the dev-channels dialog auto-accept usually takes 1-3s but
-// can sit longer if claude shows additional first-run screens.
+// Generous because Claude may show first-run screens before writing the
+// transcript.
 export const START_TIMEOUT_MS = 60_000;
 
 export function claudeProjectsRoot(home: string = homedir()): string {

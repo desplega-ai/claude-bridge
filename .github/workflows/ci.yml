@@ -71,7 +71,7 @@ jobs:
           which claude
           claude -v
 
-      - name: Seed Claude OAuth credentials
+      - name: Prepare Claude OAuth token
         if: steps.token.outputs.present == 'true'
         shell: bash
         env:
@@ -80,51 +80,59 @@ jobs:
           set -euo pipefail
           mkdir -p "$HOME/.claude"
           chmod 700 "$HOME/.claude"
-          node <<'NODE'
-          const fs = require("node:fs");
-          const os = require("node:os");
-          const path = require("node:path");
-
+          token="$(
+            node <<'NODE'
           const rawToken = (process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "").trim();
           const token = rawToken
             .replace(/^CLAUDE_CODE_OAUTH_TOKEN=/, "")
             .replace(/^export CLAUDE_CODE_OAUTH_TOKEN=/, "")
             .replace(/^['"]|['"]$/g, "")
+            .replace(/\s+/g, "")
             .trim();
           if (!token.startsWith("sk-ant-")) {
             throw new Error("CLAUDE_CODE_OAUTH_TOKEN must be a Claude OAuth token from `claude setup-token`");
           }
-          console.log(`Seeding Claude OAuth token (${token.length} chars)`);
-
-          const credentialsPath = path.join(os.homedir(), ".claude", ".credentials.json");
-          const credentials = {
-            claudeAiOauth: {
-              accessToken: token,
-              expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000,
-              scopes: [
-                "user:profile",
-                "user:inference",
-                "user:sessions:claude_code",
-                "user:mcp_servers",
-                "user:file_upload",
-              ],
-            },
-          };
-          fs.writeFileSync(credentialsPath, JSON.stringify(credentials));
-          fs.chmodSync(credentialsPath, 0o600);
+          process.stdout.write(token);
           NODE
-          env -u CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR="$HOME/.claude" claude auth status
+          )"
+          echo "::add-mask::$token"
+          echo "Prepared Claude OAuth token (${#token} chars)"
+          CLAUDE_CODE_OAUTH_TOKEN="$token" CLAUDE_CONFIG_DIR="$HOME/.claude" claude auth status
 
       - name: Run bridge print smoke
         if: steps.token.outputs.present == 'true'
         shell: bash
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
           set -euo pipefail
+          token="$(
+            node <<'NODE'
+          const rawToken = (process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "").trim();
+          const token = rawToken
+            .replace(/^CLAUDE_CODE_OAUTH_TOKEN=/, "")
+            .replace(/^export CLAUDE_CODE_OAUTH_TOKEN=/, "")
+            .replace(/^['"]|['"]$/g, "")
+            .replace(/\s+/g, "")
+            .trim();
+          if (!token.startsWith("sk-ant-")) {
+            throw new Error("CLAUDE_CODE_OAUTH_TOKEN must be a Claude OAuth token from `claude setup-token`");
+          }
+          process.stdout.write(token);
+          NODE
+          )"
+          echo "::add-mask::$token"
+          export CLAUDE_CODE_OAUTH_TOKEN="$token"
           out=/tmp/claude-bridge-live-smoke.json
           if ! timeout 300 env \
+            -u ANTHROPIC_API_KEY \
+            -u ANTHROPIC_AUTH_TOKEN \
+            -u ANTHROPIC_BASE_URL \
+            -u ANTHROPIC_CUSTOM_HEADERS \
+            -u ANTHROPIC_MODEL \
             TERM=xterm-256color \
             CLAUDE_CONFIG_DIR="$HOME/.claude" \
-            CLAUDE_BRIDGE_PRINT_CHANNEL_TIMEOUT_MS=240000 \
+            CLAUDE_BRIDGE_PRINT_READY_TIMEOUT_MS=240000 \
             CLAUDE_BRIDGE_CLAUDE_READY_TIMEOUT_MS=240000 \
             bun ./src/cli.ts \
               --desplega-verbose \
