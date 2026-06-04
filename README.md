@@ -58,6 +58,19 @@ Claude's UI:
 
 ## Install
 
+From npm:
+
+```sh
+bunx @desplega.ai/claude-bridge --help
+bun install -g @desplega.ai/claude-bridge
+npm install -g @desplega.ai/claude-bridge
+```
+
+The CLI still requires Bun at runtime because the published bin uses
+`#!/usr/bin/env bun`.
+
+For local development:
+
 ```sh
 bun install
 ```
@@ -367,6 +380,27 @@ CLAUDE_BRIDGE_SMOKE_OUTPUT_FORMAT=json \
 CLAUDE_BRIDGE_SMOKE_SCHEMA=true \
 bun run ci:live-smoke
 ```
+
+## Release
+
+The npm package is `@desplega.ai/claude-bridge`.
+
+Releases are automated from `master`: when `package.json`'s `version` changes,
+`.github/workflows/release.yml` validates the package, publishes the public npm
+package with `NPM_TOKEN`, creates the `vX.Y.Z` git tag, and creates a GitHub
+Release.
+
+Prepare a release on a branch:
+
+```sh
+npm version --no-git-tag-version patch
+bun install
+git add package.json bun.lock
+```
+
+The package tarball is intentionally allowlisted in `package.json`. Keep tests,
+CI scripts, `.github`, `AGENTS.md`, and `CLAUDE.md` out of the public npm
+package.
 
 ## Layout
 

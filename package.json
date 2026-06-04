@@ -1,14 +1,47 @@
 {
-  "name": "claude-bridge",
+  "name": "@desplega.ai/claude-bridge",
   "version": "0.0.1",
   "description": "Bridge Claude Code's interactive session through tmux and transcript output.",
-  "private": true,
   "type": "module",
-  "author": {
-    "name": "Desplega Labs",
-    "url": "https://desplega.sh"
+  "license": "MIT",
+  "author": "desplega.sh <contact@desplega.sh>",
+  "maintainers": [
+    {
+      "name": "Taras",
+      "email": "t@desplega.sh"
+    }
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/desplega-ai/claude-bridge.git"
   },
-  "homepage": "https://desplega.sh",
+  "bugs": {
+    "url": "https://github.com/desplega-ai/claude-bridge/issues"
+  },
+  "homepage": "https://github.com/desplega-ai/claude-bridge#readme",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "tmux",
+    "json-schema",
+    "cli"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "src/args.ts",
+    "src/bridge.ts",
+    "src/cli.ts",
+    "src/hook-install.ts",
+    "src/json-schema.ts",
+    "src/mcp-channel.ts",
+    "src/preaccept.ts",
+    "src/print-result.ts",
+    "src/stop-hook.ts",
+    "src/transcript.ts",
+    "src/view.ts"
+  ],
   "bin": {
     "claude-bridge": "./src/cli.ts"
   },
@@ -34,5 +67,8 @@
     "@types/bun": "latest",
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0"
+  },
+  "engines": {
+    "bun": ">=1.1"
   }
 }
