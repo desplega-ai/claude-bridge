@@ -578,16 +578,12 @@ function claudeAuthEnvArgs(): string[] {
     const value = process.env[name];
     if (value) args.push(`${name}=${value}`);
   }
-  if (process.env.CLAUDE_CODE_OAUTH_TOKEN && !process.env.ANTHROPIC_AUTH_TOKEN) {
-    args.push(`ANTHROPIC_AUTH_TOKEN=${process.env.CLAUDE_CODE_OAUTH_TOKEN}`);
-  }
   return args;
 }
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 const DEV_CHANNEL_DIALOG_RE = /(Loading development channels|Enter to confirm)/i;
 const THEME_DIALOG_RE = /(Choose the text style that looks best with your terminal|To change this later, run \/theme)/i;
-const LOGIN_METHOD_DIALOG_RE = /(Select login method|Claude account with subscription)/i;
 const SECURITY_NOTES_DIALOG_RE = /(Security notes:|Press Enter to continue)/i;
 const CHANNELS_UNAVAILABLE_RE =
   /(Channels are not currently available|--dangerously-load-development-channels ignored)/i;
@@ -643,9 +639,8 @@ async function autoAcceptStartupPrompts(): Promise<void> {
 
 function startupPromptFromPane(
   pane: string
-): "theme" | "login-method" | "security-notes" | "dev-channel" | null {
+): "theme" | "security-notes" | "dev-channel" | null {
   if (THEME_DIALOG_RE.test(pane)) return "theme";
-  if (process.env.CLAUDE_CODE_OAUTH_TOKEN && LOGIN_METHOD_DIALOG_RE.test(pane)) return "login-method";
   if (SECURITY_NOTES_DIALOG_RE.test(pane)) return "security-notes";
   if (DEV_CHANNEL_DIALOG_RE.test(pane)) return "dev-channel";
   return null;
@@ -690,7 +685,7 @@ function isClaudePaneReady(pane: string): boolean {
   return (
     !DEV_CHANNEL_DIALOG_RE.test(pane) &&
     /Channels \(experimental\)/.test(pane) &&
-    /-- INSERT --/.test(pane)
+    /(-- INSERT --|❯)/.test(pane)
   );
 }
 

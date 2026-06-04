@@ -123,33 +123,6 @@ jobs:
               > "$out"; then
             echo "bridge smoke output:"
             cat "$out" 2>/dev/null || true
-            if node - "$out" <<'NODE'
-            const fs = require("node:fs");
-            const file = process.argv[2];
-            let text = "";
-            try {
-              text = fs.readFileSync(file, "utf8");
-            } catch {
-              // Leave text empty; this was not the known channel-auth case.
-            }
-            let haystack = text;
-            try {
-              const result = JSON.parse(text);
-              haystack += "\n" + (result.error ?? "");
-              haystack += "\n" + JSON.stringify(result.debug ?? []);
-            } catch {
-              // Non-JSON output is still checked by text regex below.
-            }
-            const unsupportedChannelAuth =
-              /without channel support|channels unavailable|Channels are not currently available|dangerously-load-development-channels ignored/i.test(
-                haystack
-              );
-            process.exit(unsupportedChannelAuth ? 0 : 1);
-          NODE
-            then
-              echo "::notice::Claude Code reported channels unavailable under this CI auth token; skipping live bridge smoke."
-              exit 0
-            fi
             echo "active bridge tmux panes:"
             (tmux ls 2>/dev/null || true) | awk -F: '/^claude-bridge-/ {print $1}' | while read -r session; do
               echo "--- $session"

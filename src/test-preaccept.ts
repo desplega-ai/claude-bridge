@@ -21,9 +21,13 @@ try {
 
   preAcceptProject({ workdir, mcpServerNames: ["bridge"] });
   const config = JSON.parse(readFileSync(configPath, "utf8")) as {
+    hasCompletedOnboarding?: boolean;
+    lastOnboardingVersion?: string;
     projects?: Record<string, Record<string, unknown>>;
   };
   const project = config.projects?.[workdir];
+  ok("marks global onboarding complete", config.hasCompletedOnboarding === true);
+  ok("sets global onboarding version", typeof config.lastOnboardingVersion === "string");
   ok("creates project entry", Boolean(project));
   ok("accepts trust dialog", project?.hasTrustDialogAccepted === true);
   ok("marks onboarding complete", project?.hasCompletedProjectOnboarding === true);

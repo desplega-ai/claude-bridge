@@ -37,8 +37,12 @@ export function preAcceptProject(opts: { workdir: string; mcpServerNames: string
 
   const raw = readFileSync(claudeJsonPath, "utf8");
   const obj = JSON.parse(raw) as {
+    hasCompletedOnboarding?: boolean;
+    lastOnboardingVersion?: string;
     projects?: Record<string, Record<string, unknown>>;
   };
+  obj.hasCompletedOnboarding = true;
+  obj.lastOnboardingVersion ??= "2.1.0";
   obj.projects ??= {};
   const entry = (obj.projects[opts.workdir] ??= {});
   entry.hasTrustDialogAccepted = true;

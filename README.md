@@ -371,8 +371,7 @@ and pull requests.
 The workflow also has a gated live smoke job. If the GitHub Actions environment
 has `CLAUDE_CODE_OAUTH_TOKEN` available, it installs `tmux` and Claude Code,
 seeds the runner's ephemeral `~/.claude/.credentials.json` from that token, and
-the wrapper forwards the token into the tmux-launched Claude process as bearer
-auth when `ANTHROPIC_AUTH_TOKEN` is not already set. It then runs:
+then runs:
 
 ```sh
 bun ./src/cli.ts -p "Return exactly a JSON object with resp set to ok." \
@@ -382,12 +381,9 @@ bun ./src/cli.ts -p "Return exactly a JSON object with resp set to ok." \
 ```
 
 If the secret is not available, the live smoke is skipped while the
-deterministic job still runs. If Claude accepts the token only for inference
-and reports that channels are unavailable, the job emits a notice and skips the
-live bridge assertion. That keeps CI honest: the bridge path still requires a
-full channel-capable Claude Code session, while deterministic tests continue to
-cover argument parsing, schema validation, hook installation, and wrapper
-formatting.
+deterministic job still runs. Keep the token in Claude's credentials file; do
+not remap it to `ANTHROPIC_AUTH_TOKEN`, because that starts Claude in bearer
+auth mode and disables the channel surface that the bridge requires.
 
 ## Layout
 
