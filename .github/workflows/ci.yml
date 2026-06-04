@@ -1,0 +1,159 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+jobs:
+  test:
+    name: Deterministic tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Run tests
+        run: bun run test
+
+      - name: Typecheck
+        run: bun run typecheck
+
+  live-smoke:
+    name: Claude bridge live smoke matrix (${{ matrix.output_format }}, schema=${{ matrix.json_schema }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        output_format:
+          - text
+          - json
+          - stream-json
+        json_schema:
+          - "false"
+          - "true"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check for Claude OAuth token
+        id: token
+        shell: bash
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "CLAUDE_CODE_OAUTH_TOKEN is not available; skipping live smoke."
+          fi
+
+      - name: Set up Bun
+        if: steps.token.outputs.present == 'true'
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install tmux
+        if: steps.token.outputs.present == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux
+
+      - name: Install dependencies
+        if: steps.token.outputs.present == 'true'
+        run: bun install
+
+      - name: Install Claude Code
+        if: steps.token.outputs.present == 'true'
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Show Claude version
+        if: steps.token.outputs.present == 'true'
+        run: |
+          which claude
+          claude -v
+
+      - name: Prepare Claude OAuth token
+        if: steps.token.outputs.present == 'true'
+        shell: bash
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.claude"
+          chmod 700 "$HOME/.claude"
+          token="$(
+            node <<'NODE'
+          const rawToken = (process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "").trim();
+          const token = rawToken
+            .replace(/^CLAUDE_CODE_OAUTH_TOKEN=/, "")
+            .replace(/^export CLAUDE_CODE_OAUTH_TOKEN=/, "")
+            .replace(/^['"]|['"]$/g, "")
+            .replace(/\s+/g, "")
+            .trim();
+          if (!token.startsWith("sk-ant-")) {
+            throw new Error("CLAUDE_CODE_OAUTH_TOKEN must be a Claude OAuth token from `claude setup-token`");
+          }
+          process.stdout.write(token);
+          NODE
+          )"
+          echo "::add-mask::$token"
+          echo "Prepared Claude OAuth token (${#token} chars)"
+          CLAUDE_CODE_OAUTH_TOKEN="$token" CLAUDE_CONFIG_DIR="$HOME/.claude" claude auth status
+
+      - name: Run bridge print smoke
+        if: steps.token.outputs.present == 'true'
+        shell: bash
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CLAUDE_BRIDGE_SMOKE_OUTPUT_FORMAT: ${{ matrix.output_format }}
+          CLAUDE_BRIDGE_SMOKE_SCHEMA: ${{ matrix.json_schema }}
+        run: |
+          set -euo pipefail
+          token="$(
+            node <<'NODE'
+          const rawToken = (process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "").trim();
+          const token = rawToken
+            .replace(/^CLAUDE_CODE_OAUTH_TOKEN=/, "")
+            .replace(/^export CLAUDE_CODE_OAUTH_TOKEN=/, "")
+            .replace(/^['"]|['"]$/g, "")
+            .replace(/\s+/g, "")
+            .trim();
+          if (!token.startsWith("sk-ant-")) {
+            throw new Error("CLAUDE_CODE_OAUTH_TOKEN must be a Claude OAuth token from `claude setup-token`");
+          }
+          process.stdout.write(token);
+          NODE
+          )"
+          echo "::add-mask::$token"
+          export CLAUDE_CODE_OAUTH_TOKEN="$token"
+          CLAUDE_CONFIG_DIR="$HOME/.claude" bun run ci:live-smoke
+
+      - name: Clean up bridge tmux sessions
+        if: always()
+        shell: bash
+        run: |
+          (tmux ls 2>/dev/null || true) | awk -F: '/^claude-bridge-/ {print $1}' | xargs -r -n1 tmux kill-session -t
+
+  live-smoke-required-check:
+    name: Claude bridge live smoke
+    runs-on: ubuntu-latest
+    needs: live-smoke
+    if: always()
+    steps:
+      - name: Require live smoke matrix success
+        shell: bash
+        run: |
+          if [ "${{ needs.live-smoke.result }}" != "success" ]; then
+            echo "live-smoke matrix result: ${{ needs.live-smoke.result }}"
+            exit 1
+          fi
+          echo "live-smoke matrix result: success"

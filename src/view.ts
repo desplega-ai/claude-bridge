@@ -81,13 +81,12 @@ const formatTranscriptRow = (row: Json): string | null => {
     if (sub === "turn_duration") {
       return `${ts} ${c(C.yellow, "system    ")} turn_duration=${row.durationMs}ms`;
     }
-    return `${ts} ${c(C.yellow, "system    ")} ${sub || JSON.stringify(row).slice(0, 200)}`;
+    return null;
   }
-  if (type === "ctc_parse_error") {
+  if (type === "bridge_parse_error") {
     return `${ts} ${c(C.red, "parse_err ")} ${String(row.line ?? "").slice(0, 200)}`;
   }
-  // Fallback: show the type + a compact JSON preview.
-  return `${ts} ${c(C.grey, type.padEnd(10).slice(0, 10))} ${truncate(JSON.stringify(row), 300)}`;
+  return null;
 };
 
 export interface FormatOptions {
@@ -112,15 +111,17 @@ export function formatEnvelope(env: Json, opts: FormatOptions = {}): string | nu
       const row = (env.row as Json | undefined) ?? {};
       const friendly = formatTranscriptRow(row);
       const rawLine = `${ts} ${c(C.dim, "raw       ")} ${truncate(JSON.stringify(row), 600)}`;
-      if (opts.showRaw) return rawLine;
-      // Default: friendly summary + dim raw line, so the on-disk JSONL is
-      // always visible alongside the readable view.
-      return friendly ? `${friendly}\n${c(C.dim, rawLine)}` : rawLine;
+      if (opts.showRaw) return friendly ? `${friendly}\n${c(C.dim, rawLine)}` : rawLine;
+      return friendly;
     }
-    case "ctc_warning":
+    case "bridge_warning":
       return `${ts} ${c(C.yellow, "warning   ")} ${String(env.message ?? "")}`;
-    case "ctc_error":
+    case "bridge_error":
       return `${ts} ${c(C.red, "error     ")} ${String(env.where ?? "")}: ${String(env.message ?? "")}`;
+    case "desplega_debug": {
+      const data = env.data ? ` ${truncate(JSON.stringify(env.data), 500)}` : "";
+      return `${ts} ${c(C.dim, "debug     ")} ${String(env.message ?? "")}${data}`;
+    }
     default:
       return `${ts} ${c(C.grey, type.padEnd(10).slice(0, 10))} ${JSON.stringify(env)}`;
   }

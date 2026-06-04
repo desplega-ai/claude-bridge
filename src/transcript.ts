@@ -3,19 +3,19 @@
  * dexhorthy/shannon: snapshot the pre-existing *.jsonl set, poll until a new
  * file appears, then poll-and-reparse the whole file every POLL_MS.
  *
- * We do NOT compute the slug locally — Claude's slug rule has version drift
- * (e.g. it sometimes strips leading dots, sometimes doesn't). Instead we scan
- * ~/.claude/projects/* for a directory whose name contains a unique discriminator
- * (the run id), which is guaranteed to be in the path Claude uses as cwd.
+ * We do NOT rely on a computed slug in production — Claude's slug rule has
+ * version drift (e.g. it sometimes strips leading dots, sometimes doesn't).
+ * Instead, the CLI snapshots transcript files before launch and waits for a
+ * fresh transcript whose rows report the target cwd.
  */
 import { Glob } from "bun";
-import { join, basename, resolve } from "node:path";
+import { join, basename, dirname, resolve } from "node:path";
 import { homedir } from "node:os";
 import { readdir } from "node:fs/promises";
 
 export const POLL_MS = 100;
-// Generous because the dev-channels dialog auto-accept usually takes 1-3s but
-// can sit longer if claude shows additional first-run screens.
+// Generous because Claude may show first-run screens before writing the
+// transcript.
 export const START_TIMEOUT_MS = 60_000;
 
 export function claudeProjectsRoot(home: string = homedir()): string {
@@ -71,6 +71,20 @@ export async function listTranscriptPaths(projectFolder: string): Promise<Set<st
   return paths;
 }
 
+export async function listAllTranscriptPaths(root: string = claudeProjectsRoot()): Promise<Set<string>> {
+  const paths = new Set<string>();
+  let projectFolders: string[] = [];
+  try {
+    projectFolders = (await readdir(root)).map(name => join(root, name));
+  } catch {
+    return paths;
+  }
+  for (const folder of projectFolders) {
+    for (const path of await listTranscriptPaths(folder)) paths.add(path);
+  }
+  return paths;
+}
+
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
 export async function waitForFreshTranscript(
@@ -89,6 +103,31 @@ export async function waitForFreshTranscript(
   throw new Error(`Timed out waiting for a fresh transcript in ${projectFolder}`);
 }
 
+export async function waitForFreshTranscriptForCwd(
+  cwd: string,
+  before: Set<string>,
+  signal?: AbortSignal,
+  root: string = claudeProjectsRoot()
+): Promise<string> {
+  const targetCwd = resolve(cwd);
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < START_TIMEOUT_MS) {
+    if (signal?.aborted) throw new Error("aborted");
+    const paths = await listAllTranscriptPaths(root);
+    const fresh = [...paths].filter(p => !before.has(p)).sort();
+    for (const path of fresh) {
+      const rows = await readTranscript(path);
+      if (rows.some(row => typeof row.cwd === "string" && resolve(row.cwd) === targetCwd)) {
+        return path;
+      }
+      // A just-created transcript may not have its init row yet. Keep polling.
+      if (rows.length === 0) continue;
+    }
+    await sleep(POLL_MS);
+  }
+  throw new Error(`Timed out waiting for a fresh transcript for cwd ${targetCwd}`);
+}
+
 export type TranscriptRow = Record<string, unknown> & { type?: string };
 
 export async function readTranscript(transcriptPath: string): Promise<TranscriptRow[]> {
@@ -102,7 +141,7 @@ export async function readTranscript(transcriptPath: string): Promise<Transcript
       try {
         return JSON.parse(line) as TranscriptRow;
       } catch {
-        return { type: "ctc_parse_error", line };
+        return { type: "bridge_parse_error", line };
       }
     });
 }
@@ -123,4 +162,8 @@ export async function tailTranscript(
 
 export function sessionIdFromPath(transcriptPath: string): string {
   return basename(transcriptPath).replace(/\.jsonl$/, "");
+}
+
+export function projectFolderFromTranscript(transcriptPath: string): string {
+  return dirname(transcriptPath);
 }

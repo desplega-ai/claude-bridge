@@ -1,22 +1,34 @@
 {
-  "name": "claude-tmux-channel",
+  "name": "claude-bridge",
   "version": "0.0.1",
-  "description": "POC: drive interactive claude in tmux (Shannon-style) and bridge an in-process channel MCP back to the orchestrator.",
+  "description": "Bridge Claude Code's interactive session through tmux and transcript output.",
   "private": true,
   "type": "module",
+  "author": {
+    "name": "Desplega Labs",
+    "url": "https://desplega.sh"
+  },
+  "homepage": "https://desplega.sh",
   "bin": {
-    "ctc": "./src/cli.ts"
+    "claude-bridge": "./src/cli.ts"
   },
   "scripts": {
     "start": "bun ./src/cli.ts",
+    "ci:live-smoke": "bun ./scripts/ci-live-smoke.ts",
     "channel": "bun ./src/mcp-channel.ts",
     "test:smoke": "bun ./src/test-smoke.ts",
+    "test:args": "bun ./src/test-args.ts",
+    "test:hooks": "bun ./src/test-hooks.ts",
+    "test:json-schema": "bun ./src/test-json-schema.ts",
+    "test:preaccept": "bun ./src/test-preaccept.ts",
+    "test:print-result": "bun ./src/test-print-result.ts",
     "test:transcript": "bun ./src/test-transcript.ts",
-    "test": "bun run test:smoke && bun run test:transcript",
+    "test": "bun run test:smoke && bun run test:transcript && bun run test:args && bun run test:json-schema && bun run test:hooks && bun run test:preaccept && bun run test:print-result",
     "typecheck": "bun tsc --noEmit"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.4"
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/bun": "latest",

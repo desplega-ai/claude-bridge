@@ -4,7 +4,7 @@
  * when started with --dangerously-load-development-channels server:bridge.
  *
  * Bridges the running Claude session to the parent orchestrator over a
- * Unix domain socket whose path is provided via CTC_SOCK.
+ * Unix domain socket whose path is provided via CLAUDE_BRIDGE_SOCK.
  */
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -12,10 +12,10 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { createConnection } from "node:net";
 import { onLines, send, type Envelope } from "./bridge.ts";
 
-const SOCK = process.env.CTC_SOCK;
-const CHANNEL_NAME = process.env.CTC_CHANNEL_NAME ?? "bridge";
+const SOCK = process.env.CLAUDE_BRIDGE_SOCK;
+const CHANNEL_NAME = process.env.CLAUDE_BRIDGE_CHANNEL_NAME ?? "bridge";
 if (!SOCK) {
-  process.stderr.write("[mcp-channel] CTC_SOCK env var is required\n");
+  process.stderr.write("[mcp-channel] CLAUDE_BRIDGE_SOCK env var is required\n");
   process.exit(1);
 }
 
@@ -51,10 +51,16 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 }));
 
 const sock = createConnection(SOCK);
+const pendingPushes: Extract<Envelope, { kind: "push" }>[] = [];
+let socketReady = false;
+let mcpReady = false;
+let clientInitialized = false;
+let helloSent = false;
 
 sock.on("connect", () => {
-  send(sock, { kind: "hello", pid: process.pid, channel: CHANNEL_NAME });
   process.stderr.write(`[mcp-channel] connected to ${SOCK}\n`);
+  socketReady = true;
+  maybeSendHello();
 });
 
 sock.on("error", err => {
@@ -69,13 +75,35 @@ sock.on("close", () => {
 
 onLines(sock, async env => {
   if (env.kind === "push") {
-    const meta: Record<string, string> = { id: env.id, ...(env.meta ?? {}) };
-    await mcp.notification({
-      method: "notifications/claude/channel",
-      params: { content: env.content, meta },
-    });
+    if (!mcpReady) {
+      pendingPushes.push(env);
+      return;
+    }
+    await notifyClaude(env);
   }
 });
+
+function maybeSendHello(): void {
+  if (!socketReady || !mcpReady || !clientInitialized || helloSent) return;
+  helloSent = true;
+  send(sock, { kind: "hello", pid: process.pid, channel: CHANNEL_NAME });
+  void flushPendingPushes();
+}
+
+async function flushPendingPushes(): Promise<void> {
+  while (pendingPushes.length > 0) {
+    const env = pendingPushes.shift();
+    if (env) await notifyClaude(env);
+  }
+}
+
+async function notifyClaude(env: Extract<Envelope, { kind: "push" }>): Promise<void> {
+  const meta: Record<string, string> = { id: env.id, ...(env.meta ?? {}) };
+  await mcp.notification({
+    method: "notifications/claude/channel",
+    params: { content: env.content, meta },
+  });
+}
 
 mcp.setRequestHandler(CallToolRequestSchema, async req => {
   if (req.params.name !== "reply") {
@@ -90,5 +118,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   return { content: [{ type: "text", text: "sent" }] };
 });
 
+mcp.oninitialized = () => {
+  process.stderr.write("[mcp-channel] client initialized\n");
+  clientInitialized = true;
+  maybeSendHello();
+};
+
 await mcp.connect(new StdioServerTransport());
 process.stderr.write("[mcp-channel] mcp connected over stdio\n");
+mcpReady = true;
+maybeSendHello();
