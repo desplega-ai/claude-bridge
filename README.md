@@ -72,9 +72,12 @@ Claude's UI:
 Run without installing:
 
 ```sh
+# Drop-in print-mode usage.
 bunx @desplega.ai/claude-bridge -p "say hi"
 bunx @desplega.ai/claude-bridge -p "say hi" --output-format json
 bunx @desplega.ai/claude-bridge -p "say hi" --output-format stream-json
+
+# Opt in to Desplega/bridge envelopes for bridge-specific consumers.
 bunx @desplega.ai/claude-bridge -p "say hi" --output-format stream-json --desplega-format
 ```
 
@@ -112,12 +115,19 @@ Print mode is intended for shell automation that would otherwise call
 ```sh
 claude -p "say hi" --output-format json
 claude-bridge -p "say hi" --output-format json
+
+claude -p "say hi" --output-format stream-json
+claude-bridge -p "say hi" --output-format stream-json
 ```
 
 This is intended as a drop-in replacement for common `claude -p` automation.
 In print mode the wrapper starts an interactive Claude session in tmux, waits
 for the pane to become ready, sends the prompt through tmux, prints the
 requested format, then kills the tmux session.
+
+By default, print-mode stdout is reserved for the requested Claude-compatible
+output. Bridge envelopes and bridge debug events are not written to stdout in
+`json` or `stream-json` mode unless you explicitly pass `--desplega-format`.
 
 ## Auth
 
@@ -174,6 +184,9 @@ to the tmux pane shown in the banner and complete the prompt manually.
 requires print mode and accepts `text`, `json`, or `stream-json`; the default is
 `text`. `--json-schema` is also print-only.
 
+Compatibility mode is the default. If you are replacing `claude -p` in scripts,
+do not pass `--desplega-format`.
+
 The final result comes from the transcript. When Claude writes a `system`
 `turn_duration` row, the wrapper uses the latest assistant text it saw in that
 turn.
@@ -187,7 +200,8 @@ turn.
   The bridge does not wrap them in custom envelopes.
 
 Use `--desplega-format` when you want the older bridge-owned JSON envelopes in
-`json` or `stream-json` modes:
+`json` or `stream-json` modes. This flag is for bridge-specific consumers, not
+drop-in `claude -p` replacement scripts:
 
 ```sh
 claude-bridge -p "say hi" --output-format stream-json --desplega-format
@@ -198,7 +212,7 @@ With `--desplega-format`, `json` includes bridge debug metadata when
 events as the run progresses, then a final `result` event. This is a custom
 `claude-bridge` event stream, not Claude's native `stream-json` schema.
 
-Typical `stream-json` event types are:
+Typical `--desplega-format --output-format stream-json` event types are:
 
 ```jsonc
 {"type":"push","id":"ab12cd34","content":"say hi"}
