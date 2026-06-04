@@ -385,6 +385,8 @@ bun run ci:live-smoke
 
 The npm package is `@desplega.ai/claude-bridge`.
 
+See [docs/releasing.md](docs/releasing.md) for the full release runbook.
+
 Releases are automated from `master`: when `package.json`'s `version` changes,
 `.github/workflows/release.yml` validates the package, publishes the public npm
 package with `NPM_TOKEN`, creates the `vX.Y.Z` git tag, and creates a GitHub

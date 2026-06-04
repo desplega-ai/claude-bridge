@@ -43,7 +43,7 @@
     "src/view.ts"
   ],
   "bin": {
-    "claude-bridge": "./src/cli.ts"
+    "claude-bridge": "src/cli.ts"
   },
   "scripts": {
     "start": "bun ./src/cli.ts",
