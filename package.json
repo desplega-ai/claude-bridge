@@ -14,6 +14,7 @@
   },
   "scripts": {
     "start": "bun ./src/cli.ts",
+    "ci:live-smoke": "bun ./scripts/ci-live-smoke.ts",
     "channel": "bun ./src/mcp-channel.ts",
     "test:smoke": "bun ./src/test-smoke.ts",
     "test:args": "bun ./src/test-args.ts",

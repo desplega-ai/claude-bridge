@@ -512,6 +512,7 @@ function startTmux(): void {
     "-c",
     targetCwd,
     "env",
+    ...claudeUnsetEnvArgs(),
     ...envArgs,
     "claude",
     ...claudeArgs,
@@ -551,6 +552,21 @@ function claudeAuthEnvArgs(): string[] {
     if (value) args.push(`${name}=${value}`);
   }
   return args;
+}
+
+function claudeUnsetEnvArgs(): string[] {
+  return [
+    "-u",
+    "ANTHROPIC_API_KEY",
+    "-u",
+    "ANTHROPIC_AUTH_TOKEN",
+    "-u",
+    "ANTHROPIC_BASE_URL",
+    "-u",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "-u",
+    "ANTHROPIC_MODEL",
+  ];
 }
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));

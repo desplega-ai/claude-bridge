@@ -346,14 +346,12 @@ and pull requests.
 
 The workflow also has a gated live smoke job. If the GitHub Actions environment
 has `CLAUDE_CODE_OAUTH_TOKEN` available, it installs `tmux` and Claude Code,
-normalizes that token into the job environment, and then runs:
+normalizes that token into the job environment, and then runs a matrix across:
 
-```sh
-bun ./src/cli.ts -p "Return exactly a JSON object with resp set to ok." \
-  --model sonnet \
-  --output-format json \
-  --json-schema '{"type":"object","properties":{"resp":{"type":"string"}},"required":["resp"],"additionalProperties":false}'
-```
+- `--output-format text`
+- `--output-format json`
+- `--output-format stream-json`
+- schema mode enabled and disabled
 
 If the secret is not available, the live smoke is skipped while the
 deterministic job still runs. Use the `CLAUDE_CODE_OAUTH_TOKEN` path exactly as
@@ -361,6 +359,14 @@ deterministic job still runs. Use the `CLAUDE_CODE_OAUTH_TOKEN` path exactly as
 The smoke command clears inherited `ANTHROPIC_*` variables so unrelated
 provider headers or API-key configuration cannot change the auth path under
 test.
+
+The workflow uses a reusable script that can be run locally:
+
+```sh
+CLAUDE_BRIDGE_SMOKE_OUTPUT_FORMAT=json \
+CLAUDE_BRIDGE_SMOKE_SCHEMA=true \
+bun run ci:live-smoke
+```
 
 ## Layout
 

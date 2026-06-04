@@ -27,9 +27,19 @@ jobs:
         run: bun run typecheck
 
   live-smoke:
-    name: Claude bridge live smoke
+    name: Claude bridge live smoke matrix (${{ matrix.output_format }}, schema=${{ matrix.json_schema }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        output_format:
+          - text
+          - json
+          - stream-json
+        json_schema:
+          - "false"
+          - "true"
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -104,6 +114,8 @@ jobs:
         shell: bash
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CLAUDE_BRIDGE_SMOKE_OUTPUT_FORMAT: ${{ matrix.output_format }}
+          CLAUDE_BRIDGE_SMOKE_SCHEMA: ${{ matrix.json_schema }}
         run: |
           set -euo pipefail
           token="$(
@@ -123,46 +135,25 @@ jobs:
           )"
           echo "::add-mask::$token"
           export CLAUDE_CODE_OAUTH_TOKEN="$token"
-          out=/tmp/claude-bridge-live-smoke.json
-          if ! timeout 300 env \
-            -u ANTHROPIC_API_KEY \
-            -u ANTHROPIC_AUTH_TOKEN \
-            -u ANTHROPIC_BASE_URL \
-            -u ANTHROPIC_CUSTOM_HEADERS \
-            -u ANTHROPIC_MODEL \
-            TERM=xterm-256color \
-            CLAUDE_CONFIG_DIR="$HOME/.claude" \
-            CLAUDE_BRIDGE_PRINT_READY_TIMEOUT_MS=240000 \
-            CLAUDE_BRIDGE_CLAUDE_READY_TIMEOUT_MS=240000 \
-            bun ./src/cli.ts \
-              --desplega-verbose \
-              -p "Return exactly a JSON object with resp set to ok." \
-              --model sonnet \
-              --output-format json \
-              --json-schema '{"type":"object","properties":{"resp":{"type":"string"}},"required":["resp"],"additionalProperties":false}' \
-              > "$out"; then
-            echo "bridge smoke output:"
-            cat "$out" 2>/dev/null || true
-            echo "active bridge tmux panes:"
-            (tmux ls 2>/dev/null || true) | awk -F: '/^claude-bridge-/ {print $1}' | while read -r session; do
-              echo "--- $session"
-              tmux capture-pane -pt "$session" -S -120 || true
-            done
-            exit 1
-          fi
-
-          bun -e '
-            const text = await Bun.file("/tmp/claude-bridge-live-smoke.json").text();
-            const result = JSON.parse(text);
-            if (result.is_error) throw new Error(result.error + (result.raw_response ? "\n" + result.raw_response : ""));
-            if (result.structured_output?.resp !== "ok") {
-              throw new Error("Unexpected structured_output: " + JSON.stringify(result));
-            }
-            console.log("live smoke structured_output:", JSON.stringify(result.structured_output));
-          '
+          CLAUDE_CONFIG_DIR="$HOME/.claude" bun run ci:live-smoke
 
       - name: Clean up bridge tmux sessions
         if: always()
         shell: bash
         run: |
           (tmux ls 2>/dev/null || true) | awk -F: '/^claude-bridge-/ {print $1}' | xargs -r -n1 tmux kill-session -t
+
+  live-smoke-required-check:
+    name: Claude bridge live smoke
+    runs-on: ubuntu-latest
+    needs: live-smoke
+    if: always()
+    steps:
+      - name: Require live smoke matrix success
+        shell: bash
+        run: |
+          if [ "${{ needs.live-smoke.result }}" != "success" ]; then
+            echo "live-smoke matrix result: ${{ needs.live-smoke.result }}"
+            exit 1
+          fi
+          echo "live-smoke matrix result: success"
