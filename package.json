@@ -31,6 +31,7 @@
   },
   "files": [
     "src/args.ts",
+    "src/auth-env.ts",
     "src/bridge.ts",
     "src/cli.ts",
     "src/hook-install.ts",
@@ -51,12 +52,13 @@
     "channel": "bun ./src/mcp-channel.ts",
     "test:smoke": "bun ./src/test-smoke.ts",
     "test:args": "bun ./src/test-args.ts",
+    "test:auth-env": "bun ./src/test-auth-env.ts",
     "test:hooks": "bun ./src/test-hooks.ts",
     "test:json-schema": "bun ./src/test-json-schema.ts",
     "test:preaccept": "bun ./src/test-preaccept.ts",
     "test:print-result": "bun ./src/test-print-result.ts",
     "test:transcript": "bun ./src/test-transcript.ts",
-    "test": "bun run test:smoke && bun run test:transcript && bun run test:args && bun run test:json-schema && bun run test:hooks && bun run test:preaccept && bun run test:print-result",
+    "test": "bun run test:smoke && bun run test:transcript && bun run test:args && bun run test:auth-env && bun run test:json-schema && bun run test:hooks && bun run test:preaccept && bun run test:print-result",
     "typecheck": "bun tsc --noEmit"
   },
   "dependencies": {

@@ -98,6 +98,7 @@ ok("--help is handled by wrapper", help.help);
 ok("help text includes print mode", formatWrapperHelp().includes("-p, --print"));
 ok("help text includes json schema", formatWrapperHelp().includes("--json-schema"));
 ok("help text includes desplega cwd", formatWrapperHelp().includes("--desplega-cwd"));
+ok("help text includes local auth", formatWrapperHelp().includes("--desplega-local-auth"));
 ok("help text includes hook install", formatWrapperHelp().includes("--desplega-install"));
 ok("help text includes version mode", formatWrapperHelp().includes("-v, --version"));
 ok("help text does not dump Claude help", !formatWrapperHelp().includes("Forwarded Claude help"));

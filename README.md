@@ -1,18 +1,27 @@
 # claude-bridge
 
-Proof-of-concept that combines two ideas:
+`claude-bridge` is a bridge-owned replacement for common `claude -p`
+automation.
 
-- **[Shannon](https://github.com/dexhorthy/shannon)** — drive an interactive
-  `claude` session inside a [tmux](https://github.com/tmux/tmux) pane instead of
-  calling the API directly.
-- **Wrapper-owned `claude -p` compatibility** — keep prompt dispatch, transcript
-  capture, output formatting, JSON schema validation, and turn-end exit handling
-  inside `claude-bridge` instead of delegating to raw `claude -p`.
+Instead of delegating to raw `claude -p`, it starts normal interactive Claude
+Code inside a detached [tmux](https://github.com/tmux/tmux) pane, sends your
+prompt through tmux, tails Claude's own on-disk transcript, formats the reply,
+and exits at turn end.
 
-`claude-bridge` starts `claude` inside a detached tmux session, sends prompts to
-that pane, and tails Claude's on-disk JSONL transcript (the same file `claude`
-itself writes to `~/.claude/projects/<slug>/<session-uuid>.jsonl`). Piped
-consumers get bridge envelopes; TTY users get a compact readable view. This is
+That keeps prompt dispatch, transcript capture, `--output-format`, JSON schema
+validation, and process exit behavior inside the bridge.
+
+```sh
+# Raw Claude Code print mode
+claude -p "say hi" --output-format json
+
+# Bridge-owned replacement
+bunx @desplega.ai/claude-bridge -p "say hi" --output-format json
+```
+
+The transcript source is the same JSONL file Claude writes under
+`~/.claude/projects/<slug>/<session-uuid>.jsonl`. Piped consumers get bridge
+envelopes; TTY users get a compact readable view. The transcript tailing follows
 the [Shannon](https://github.com/dexhorthy/shannon) technique: snapshot the
 pre-existing `*.jsonl` set before launch, poll for a fresh file, and
 poll-and-reparse it every 100 ms.
@@ -31,8 +40,9 @@ Claude's UI:
     `skipDangerousModePermissionPrompt: true`.
   - `claude` is launched with `--dangerously-skip-permissions`.
   - Theme/security startup prompts are auto-accepted by watching
-    `tmux capture-pane` for marker text and sending `Enter`. Login-method
-    selection is deliberately not auto-accepted.
+    `tmux capture-pane` for marker text and sending `Enter`. With
+    `--desplega-local-auth`, the custom API key confirmation prompt is also
+    auto-accepted. Login-method selection is deliberately not auto-accepted.
 
 ```
 +--------------------+
@@ -52,49 +62,50 @@ Claude's UI:
 ## Requirements
 
 - [Bun](https://bun.sh) (`>= 1.1`)
-- `claude` CLI on PATH, version `>= 2.1.80`, authenticated against claude.ai or
-  a Console API key.
+- `claude` CLI on PATH, version `>= 2.1.80`
 - `tmux` on PATH.
+- Claude Code authenticated for the spawned `claude` process.
 
-## Install
+## Use From npm
 
-From npm:
+Run without installing:
 
 ```sh
-bunx @desplega.ai/claude-bridge --help
+bunx @desplega.ai/claude-bridge -p "say hi"
+bunx @desplega.ai/claude-bridge -p "say hi" --output-format json
+bunx @desplega.ai/claude-bridge -p "say hi" --output-format stream-json
+```
+
+Install globally with Bun:
+
+```sh
 bun install -g @desplega.ai/claude-bridge
+claude-bridge -p "say hi"
+claude-bridge --help
+```
+
+Install globally with npm:
+
+```sh
 npm install -g @desplega.ai/claude-bridge
+claude-bridge -p "say hi"
 ```
 
-The CLI still requires Bun at runtime because the published bin uses
-`#!/usr/bin/env bun`.
+The installed command is `claude-bridge`. Bun is still required at runtime
+because the published bin uses `#!/usr/bin/env bun`.
 
-For local development:
+## Print Mode
 
 ```sh
-bun install
+claude-bridge -p "say hi"
+claude-bridge -p "say hi" --model sonnet
+claude-bridge -p "say hi" --output-format json
+claude-bridge -p "say hi" --output-format stream-json
+printf 'say hi\n' | claude-bridge --print
 ```
 
-## Run
-
-```sh
-# Interactive bridge
-bun ./src/cli.ts
-bun ./src/cli.ts --model sonnet "start by listing the files"
-
-# `claude -p` replacement during local development
-bun ./src/cli.ts -p "say hi"
-bun ./src/cli.ts -p "say hi" --output-format json
-bun ./src/cli.ts -p "say hi" --output-format stream-json
-bun ./src/cli.ts -p "summarize this" --json-schema schema.json --output-format json
-printf 'say hi\n' | bun ./src/cli.ts --print
-
-# Wrapper metadata/help
-bun ./src/cli.ts --version
-bun ./src/cli.ts --help
-```
-
-If you run the package bin, the command-shape replacement is:
+Print mode is intended for shell automation that would otherwise call
+`claude -p`:
 
 ```sh
 claude -p "say hi" --output-format json
@@ -107,7 +118,56 @@ an interactive Claude session in tmux, waits for the pane to become ready,
 sends the prompt through tmux, prints the requested format, then kills the tmux
 session.
 
-## Print output
+## Auth
+
+`claude-bridge` does not call the Anthropic API itself. It launches the local
+`claude` CLI and relies on whatever authentication that `claude` process can
+use.
+
+For local interactive machines, first make sure `claude` works:
+
+```sh
+claude auth status
+claude -p "say hi"
+```
+
+Then run the bridge:
+
+```sh
+claude-bridge -p "say hi"
+```
+
+For headless CI, use the long-lived Claude Code OAuth token from:
+
+```sh
+claude setup-token
+```
+
+Set it exactly as printed:
+
+```sh
+export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+claude-bridge -p "say hi" --output-format json
+```
+
+By default, the spawned Claude process receives `HOME`, `CLAUDE_CONFIG_DIR`,
+and `CLAUDE_CODE_OAUTH_TOKEN`; Anthropic provider env vars such as
+`ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are cleared so the bridge does
+not accidentally test a different auth path.
+
+Use `--desplega-local-auth` when you intentionally want the spawned Claude
+process to receive local auth-related env vars. If Claude shows the custom API
+key confirmation prompt, this mode selects the API-key path:
+
+```sh
+ANTHROPIC_API_KEY=... claude-bridge --desplega-local-auth -p "say hi"
+```
+
+If Claude shows a browser login or login-method selector, the bridge will not
+auto-select it. Run `claude auth status`, run `claude setup-token`, or attach
+to the tmux pane shown in the banner and complete the prompt manually.
+
+## Output Formats
 
 `-p`/`--print` requires a prompt argument or piped stdin. `--output-format`
 requires print mode and accepts `text`, `json`, or `stream-json`; the default is
@@ -161,8 +221,8 @@ number of extra turns to answer with valid JSON before the wrapper exits.
 Control that hook explicitly with:
 
 ```sh
-bun ./src/cli.ts --desplega-install
-bun ./src/cli.ts --desplega-uninstall
+claude-bridge --desplega-install
+claude-bridge --desplega-uninstall
 ```
 
 Install is append-only and idempotent: unrelated hooks are preserved, and stale
@@ -171,11 +231,11 @@ old `claude-bridge` hook commands are replaced with the current command.
 The schema argument may be inline JSON or a path to a JSON file:
 
 ```sh
-bun ./src/cli.ts -p "Return the repo name" \
+claude-bridge -p "Return the repo name" \
   --json-schema '{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}' \
   --output-format json
 
-bun ./src/cli.ts -p "Return the repo name" \
+claude-bridge -p "Return the repo name" \
   --json-schema ./schema.json \
   --output-format text
 ```
@@ -205,8 +265,8 @@ The compact stringified schema is capped before Claude starts. The default cap
 is roughly `15000` tokens, estimated as `ceil(chars / 4)`. Configure it with:
 
 ```sh
-CLAUDE_BRIDGE_JSON_SCHEMA_MAX_TOKENS=30000 bun ./src/cli.ts -p "..." --json-schema schema.json
-bun ./src/cli.ts -p "..." --json-schema schema.json --desplega-json-schema-max-tokens=30000
+CLAUDE_BRIDGE_JSON_SCHEMA_MAX_TOKENS=30000 claude-bridge -p "..." --json-schema schema.json
+claude-bridge -p "..." --json-schema schema.json --desplega-json-schema-max-tokens=30000
 ```
 
 ## Wrapper-owned vs forwarded
@@ -214,7 +274,8 @@ bun ./src/cli.ts -p "..." --json-schema schema.json --desplega-json-schema-max-t
 The wrapper owns these options and does not forward them to Claude:
 
 - `-p`/`--print`, `--output-format`, and `--json-schema`
-- `--desplega-verbose` and other `--desplega-<name>[=<value>]` flags
+- `--desplega-verbose`, `--desplega-local-auth`, and other
+  `--desplega-<name>[=<value>]` flags
 - `--claude-help`
 - `-h`/`--help`
 - `-v`/`--version`
@@ -243,25 +304,7 @@ Use `--desplega-verbose` for extra wrapper debug output and raw transcript
 rows. Other `--desplega-<name>[=<value>]` flags are reserved for future wrapper
 features and are not forwarded to Claude.
 
-## Future notes
-
-Structured output should stay bridge-native. Future AI SDK integration can be a
-repair or fallback layer after the transcript result, not a replacement for the
-bridge-owned turn. Plausible provider knobs are
-`--desplega-structured-provider=anthropic|openai|google|openrouter` with the
-usual `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY` /
-`GEMINI_API_KEY`, or `OPENROUTER_API_KEY` env vars. That mode would validate
-the transcript result first, then optionally ask a provider to repair invalid
-JSON into the schema.
-
-Remote/SSH support should also keep the bridge boundary. The likely shape is a
-transport abstraction (`tmux` today, HTTP MCP later) plus a tunnel abstraction
-(`none`, Tailscale Serve/Funnel, SSH reverse tunnel, cloudflared, ngrok). For a
-remote Claude session, the remote host still needs `claude`, `tmux`, Bun, and
-the bridge entrypoint. Tunnels only expose/connect the transport; they do not
-remove the need for a Claude Code process on the remote host. Public tunnels
-such as Tailscale Funnel must require a per-run bearer token and should default
-to localhost binding unless explicitly exposed.
+## Interactive Mode
 
 The CLI prints a banner with the tmux session name and run state path:
 
@@ -299,9 +342,7 @@ human-friendly rows. `--desplega-verbose` adds wrapper debug output and the
 verbatim JSONL row dimmed below each friendly transcript summary.
 
 ```sh
-bun ./src/cli.ts > run.jsonl                 # JSONL when piped
-bun ./src/view.ts < run.jsonl                # re-render an old log
-bun ./src/cli.ts --desplega-verbose          # friendly rows plus raw rows
+claude-bridge --desplega-verbose             # friendly rows plus raw rows
 ```
 
 The orchestrator shows a `> ` prompt for stdin and redraws it after every
@@ -339,7 +380,30 @@ user, assistant, tool_use, tool_result, system, etc.):
 
 Ctrl-D on the orchestrator kills the tmux session and exits.
 
-## Smoke test (no tmux, no claude)
+## Contributing and CI
+
+Install local dependencies:
+
+```sh
+bun install
+```
+
+Run the CLI from the repo:
+
+```sh
+bun ./src/cli.ts -p "say hi"
+bun ./src/cli.ts -p "say hi" --output-format json
+bun ./src/cli.ts --help
+```
+
+Run deterministic tests:
+
+```sh
+bun run test
+bun run typecheck
+```
+
+The smallest hermetic smoke test does not require tmux or Claude:
 
 A hermetic test stands up the Unix socket, spawns `mcp-channel.ts` as a stdio
 MCP subprocess, drives it through `initialize` / `tools/list` / `tools/call`,
@@ -351,8 +415,6 @@ bun run test:smoke
 ```
 
 Expected: 13 PASS lines and `result: PASS`.
-
-## CI
 
 `.github/workflows/ci.yml` runs deterministic tests and typechecking on pushes
 and pull requests.
@@ -381,6 +443,14 @@ CLAUDE_BRIDGE_SMOKE_SCHEMA=true \
 bun run ci:live-smoke
 ```
 
+To run that script with local auth env vars instead of the CI OAuth-token path:
+
+```sh
+CLAUDE_BRIDGE_SMOKE_LOCAL_AUTH=true \
+CLAUDE_BRIDGE_SMOKE_OUTPUT_FORMAT=json \
+bun run ci:live-smoke
+```
+
 ## Release
 
 The npm package is `@desplega.ai/claude-bridge`.
@@ -404,9 +474,30 @@ The package tarball is intentionally allowlisted in `package.json`. Keep tests,
 CI scripts, `.github`, `AGENTS.md`, and `CLAUDE.md` out of the public npm
 package.
 
+## Future Notes
+
+Structured output should stay bridge-native. Future AI SDK integration can be a
+repair or fallback layer after the transcript result, not a replacement for the
+bridge-owned turn. Plausible provider knobs are
+`--desplega-structured-provider=anthropic|openai|google|openrouter` with the
+usual `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY` /
+`GEMINI_API_KEY`, or `OPENROUTER_API_KEY` env vars. That mode would validate
+the transcript result first, then optionally ask a provider to repair invalid
+JSON into the schema.
+
+Remote/SSH support should also keep the bridge boundary. The likely shape is a
+transport abstraction (`tmux` today, HTTP MCP later) plus a tunnel abstraction
+(`none`, Tailscale Serve/Funnel, SSH reverse tunnel, cloudflared, ngrok). For a
+remote Claude session, the remote host still needs `claude`, `tmux`, Bun, and
+the bridge entrypoint. Tunnels only expose/connect the transport; they do not
+remove the need for a Claude Code process on the remote host. Public tunnels
+such as Tailscale Funnel must require a per-run bearer token and should default
+to localhost binding unless explicitly exposed.
+
 ## Layout
 
 - `src/cli.ts` — orchestrator (tmux launcher + stdin REPL + transcript tail).
+- `src/auth-env.ts` — auth environment forwarding and local-auth handling.
 - `src/mcp-channel.ts` — optional channel MCP kept for hermetic protocol tests
   and future transport experiments.
 - `src/bridge.ts` — newline-delimited JSON framing for the optional channel MCP.

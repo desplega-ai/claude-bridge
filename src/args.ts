@@ -243,6 +243,7 @@ export function formatWrapperHelp(): string {
     "  --json-schema <schema|file>     Extract and validate final JSON in print mode",
     "  --desplega-verbose              Emit extra wrapper debug output",
     "  --desplega-cwd <path>           Run Claude in this cwd (default: current cwd)",
+    "  --desplega-local-auth           Forward local Anthropic auth env vars",
     "  --desplega-install              Install the global schema Stop hook",
     "  --desplega-uninstall            Remove the global schema Stop hook",
     "  --desplega-<name>[=<value>]     Reserve a desplega wrapper option",

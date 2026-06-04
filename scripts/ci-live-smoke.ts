@@ -22,6 +22,7 @@ if (!existsSync(REPO)) fail(`Repository path does not exist: ${REPO}`);
 
 const OUTPUT_FORMATS = new Set<OutputFormat>(["text", "json", "stream-json"]);
 const schema = truthy(process.env.CLAUDE_BRIDGE_SMOKE_SCHEMA);
+const localAuth = truthy(process.env.CLAUDE_BRIDGE_SMOKE_LOCAL_AUTH);
 const outputFormat = (process.env.CLAUDE_BRIDGE_SMOKE_OUTPUT_FORMAT ?? "text") as OutputFormat;
 const model = process.env.CLAUDE_BRIDGE_SMOKE_MODEL ?? "sonnet";
 const timeoutMs = envInt("CLAUDE_BRIDGE_SMOKE_TIMEOUT_MS", 300_000);
@@ -49,6 +50,7 @@ const prompt = schema
 const args = [
   "./src/cli.ts",
   "--desplega-verbose",
+  ...(localAuth ? ["--desplega-local-auth"] : []),
   "-p",
   prompt,
   "--model",
@@ -62,21 +64,27 @@ if (schema) {
 }
 
 const env = { ...process.env };
-for (const name of [
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_AUTH_TOKEN",
-  "ANTHROPIC_BASE_URL",
-  "ANTHROPIC_CUSTOM_HEADERS",
-  "ANTHROPIC_MODEL",
-]) {
-  delete env[name];
+if (!localAuth) {
+  for (const name of [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "ANTHROPIC_MODEL",
+  ]) {
+    delete env[name];
+  }
 }
 
-const normalizedToken = normalizeClaudeToken(process.env.CLAUDE_CODE_OAUTH_TOKEN);
-if (normalizedToken) env.CLAUDE_CODE_OAUTH_TOKEN = normalizedToken;
+if (!localAuth) {
+  const normalizedToken = normalizeClaudeToken(process.env.CLAUDE_CODE_OAUTH_TOKEN);
+  if (normalizedToken) env.CLAUDE_CODE_OAUTH_TOKEN = normalizedToken;
+}
 
 env.TERM = "xterm-256color";
-env.CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR ?? `${process.env.HOME}/.claude`;
+if (!localAuth) {
+  env.CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR ?? `${process.env.HOME}/.claude`;
+}
 env.CLAUDE_BRIDGE_PRINT_READY_TIMEOUT_MS =
   process.env.CLAUDE_BRIDGE_PRINT_READY_TIMEOUT_MS ?? "240000";
 env.CLAUDE_BRIDGE_CLAUDE_READY_TIMEOUT_MS =
@@ -84,7 +92,7 @@ env.CLAUDE_BRIDGE_CLAUDE_READY_TIMEOUT_MS =
 env.CLAUDE_BRIDGE_TMUX_SUBMIT_DELAY_MS =
   process.env.CLAUDE_BRIDGE_TMUX_SUBMIT_DELAY_MS ?? "1000";
 
-console.log(`bridge live smoke: output_format=${outputFormat} schema=${schema} model=${model}`);
+console.log(`bridge live smoke: output_format=${outputFormat} schema=${schema} model=${model} local_auth=${localAuth}`);
 
 const run = spawnSync("bun", args, {
   cwd: REPO,

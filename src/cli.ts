@@ -19,6 +19,7 @@ import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { preAcceptProject, writeWorkdirSettings } from "./preaccept.ts";
+import { claudeAuthEnvArgs, claudeUnsetEnvArgs } from "./auth-env.ts";
 import {
   listAllTranscriptPaths,
   projectFolderFromTranscript,
@@ -490,7 +491,7 @@ function startTmux(): void {
     ...forwardedClaudeArgs,
   ];
   const envArgs = [
-    ...claudeAuthEnvArgs(),
+    ...claudeAuthEnvArgs(process.env, { localAuth: hasDesplegaFlag("local-auth") }),
     ...(jsonSchemaPath
       ? [
           "CLAUDE_BRIDGE_SCHEMA_STOP_HOOK=1",
@@ -535,43 +536,10 @@ function capturePane(): string {
   return (r.stdout ?? "") + (r.stderr ?? "");
 }
 
-function claudeAuthEnvArgs(): string[] {
-  const names = [
-    "HOME",
-    "CLAUDE_CONFIG_DIR",
-    "CLAUDE_CODE_OAUTH_TOKEN",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_CUSTOM_HEADERS",
-    "ANTHROPIC_MODEL",
-  ];
-  const args: string[] = [];
-  for (const name of names) {
-    const value = process.env[name];
-    if (value) args.push(`${name}=${value}`);
-  }
-  return args;
-}
-
-function claudeUnsetEnvArgs(): string[] {
-  return [
-    "-u",
-    "ANTHROPIC_API_KEY",
-    "-u",
-    "ANTHROPIC_AUTH_TOKEN",
-    "-u",
-    "ANTHROPIC_BASE_URL",
-    "-u",
-    "ANTHROPIC_CUSTOM_HEADERS",
-    "-u",
-    "ANTHROPIC_MODEL",
-  ];
-}
-
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 const THEME_DIALOG_RE = /(Choose the text style that looks best with your terminal|To change this later, run \/theme)/i;
 const SECURITY_NOTES_DIALOG_RE = /(Security notes:|Press Enter to continue)/i;
+const CUSTOM_API_KEY_DIALOG_RE = /(Detected a custom API key in your environment|Do you want to use this API key\?)/i;
 const CLAUDE_INPUT_PROMPT_RE = /(^|\n)\s*(?:❯|>)[^\n]*(?:\n|$)/;
 
 /**
@@ -603,7 +571,11 @@ async function autoAcceptStartupPrompts(): Promise<void> {
 
     const prompt = startupPromptFromPane(pane);
     if (prompt && Date.now() - lastFire > 600) {
-      spawnSync("tmux", ["send-keys", "-t", sessionName, "Enter"]);
+      if (prompt === "custom-api-key") {
+        spawnSync("tmux", ["send-keys", "-t", sessionName, "Up", "Enter"]);
+      } else {
+        spawnSync("tmux", ["send-keys", "-t", sessionName, "Enter"]);
+      }
       lastFire = Date.now();
       fires++;
       if (!printMode) {
@@ -623,7 +595,10 @@ async function autoAcceptStartupPrompts(): Promise<void> {
 
 function startupPromptFromPane(
   pane: string
-): "theme" | "security-notes" | null {
+): "theme" | "security-notes" | "custom-api-key" | null {
+  if (hasDesplegaFlag("local-auth") && CUSTOM_API_KEY_DIALOG_RE.test(pane)) {
+    return "custom-api-key";
+  }
   if (THEME_DIALOG_RE.test(pane)) return "theme";
   if (SECURITY_NOTES_DIALOG_RE.test(pane)) return "security-notes";
   return null;
