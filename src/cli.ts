@@ -563,11 +563,23 @@ function capturePane(): string {
 }
 
 function claudeAuthEnvArgs(): string[] {
-  const names = ["HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"];
+  const names = [
+    "HOME",
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "ANTHROPIC_MODEL",
+  ];
   const args: string[] = [];
   for (const name of names) {
     const value = process.env[name];
     if (value) args.push(`${name}=${value}`);
+  }
+  if (process.env.CLAUDE_CODE_OAUTH_TOKEN && !process.env.ANTHROPIC_AUTH_TOKEN) {
+    args.push(`ANTHROPIC_AUTH_TOKEN=${process.env.CLAUDE_CODE_OAUTH_TOKEN}`);
   }
   return args;
 }

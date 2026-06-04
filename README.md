@@ -370,8 +370,9 @@ and pull requests.
 
 The workflow also has a gated live smoke job. If the GitHub Actions environment
 has `CLAUDE_CODE_OAUTH_TOKEN` available, it installs `tmux` and Claude Code,
-seeds the runner's ephemeral `~/.claude/.credentials.json` from that token, then
-runs:
+seeds the runner's ephemeral `~/.claude/.credentials.json` from that token, and
+the wrapper forwards the token into the tmux-launched Claude process as bearer
+auth when `ANTHROPIC_AUTH_TOKEN` is not already set. It then runs:
 
 ```sh
 bun ./src/cli.ts -p "Return exactly a JSON object with resp set to ok." \
