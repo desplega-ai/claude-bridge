@@ -1,0 +1,148 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  test:
+    name: Deterministic tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Run tests
+        run: bun run test
+
+      - name: Typecheck
+        run: bun run typecheck
+
+  live-smoke:
+    name: Claude bridge live smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check for Claude OAuth token
+        id: token
+        shell: bash
+        run: |
+          if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "CLAUDE_CODE_OAUTH_TOKEN is not available; skipping live smoke."
+          fi
+
+      - name: Set up Bun
+        if: steps.token.outputs.present == 'true'
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install tmux
+        if: steps.token.outputs.present == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux
+
+      - name: Install dependencies
+        if: steps.token.outputs.present == 'true'
+        run: bun install
+
+      - name: Install Claude Code
+        if: steps.token.outputs.present == 'true'
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Show Claude version
+        if: steps.token.outputs.present == 'true'
+        run: |
+          which claude
+          claude -v
+
+      - name: Seed Claude OAuth credentials
+        if: steps.token.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.claude"
+          chmod 700 "$HOME/.claude"
+          node <<'NODE'
+          const fs = require("node:fs");
+          const os = require("node:os");
+          const path = require("node:path");
+
+          const token = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+          if (!token) throw new Error("CLAUDE_CODE_OAUTH_TOKEN is empty");
+
+          const credentialsPath = path.join(os.homedir(), ".claude", ".credentials.json");
+          const credentials = {
+            claudeAiOauth: {
+              accessToken: token,
+              expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000,
+              scopes: [
+                "user:profile",
+                "user:inference",
+                "user:sessions:claude_code",
+                "user:mcp_servers",
+                "user:file_upload",
+              ],
+            },
+          };
+          fs.writeFileSync(credentialsPath, JSON.stringify(credentials));
+          fs.chmodSync(credentialsPath, 0o600);
+          NODE
+          claude auth status
+
+      - name: Run bridge print smoke
+        if: steps.token.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=/tmp/claude-bridge-live-smoke.json
+          if ! timeout 300 env \
+            TERM=xterm-256color \
+            CLAUDE_CONFIG_DIR="$HOME/.claude" \
+            CLAUDE_BRIDGE_PRINT_CHANNEL_TIMEOUT_MS=240000 \
+            CLAUDE_BRIDGE_CLAUDE_READY_TIMEOUT_MS=240000 \
+            bun ./src/cli.ts \
+              --desplega-verbose \
+              -p "Return exactly a JSON object with resp set to ok." \
+              --model sonnet \
+              --output-format json \
+              --json-schema '{"type":"object","properties":{"resp":{"type":"string"}},"required":["resp"],"additionalProperties":false}' \
+              > "$out"; then
+            echo "bridge smoke output:"
+            cat "$out" 2>/dev/null || true
+            echo "active bridge tmux panes:"
+            (tmux ls 2>/dev/null || true) | awk -F: '/^claude-bridge-/ {print $1}' | while read -r session; do
+              echo "--- $session"
+              tmux capture-pane -pt "$session" -S -120 || true
+            done
+            exit 1
+          fi
+
+          bun -e '
+            const text = await Bun.file("/tmp/claude-bridge-live-smoke.json").text();
+            const result = JSON.parse(text);
+            if (result.is_error) throw new Error(result.error + (result.raw_response ? "\n" + result.raw_response : ""));
+            if (result.structured_output?.resp !== "ok") {
+              throw new Error("Unexpected structured_output: " + JSON.stringify(result));
+            }
+            console.log("live smoke structured_output:", JSON.stringify(result.structured_output));
+          '
+
+      - name: Clean up bridge tmux sessions
+        if: always()
+        shell: bash
+        run: |
+          (tmux ls 2>/dev/null || true) | awk -F: '/^claude-bridge-/ {print $1}' | xargs -r -n1 tmux kill-session -t

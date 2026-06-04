@@ -17,7 +17,7 @@ import { onLines, send, type Envelope } from "./bridge.ts";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MCP_ENTRY = join(HERE, "mcp-channel.ts");
 
-const workdir = mkdtempSync(join(tmpdir(), "ctc-smoke-"));
+const workdir = mkdtempSync(join(tmpdir(), "bridge-smoke-"));
 const sockPath = join(workdir, "bridge.sock");
 
 let received: Envelope[] = [];
@@ -34,10 +34,20 @@ const ok = (label: string, cond: boolean) => {
   if (!cond) process.exitCode = 1;
 };
 
-await new Promise<void>(r => server.listen(sockPath, r));
+await new Promise<void>((resolveListen, rejectListen) => {
+  server.once("error", rejectListen);
+  server.listen(sockPath, () => {
+    server.off("error", rejectListen);
+    resolveListen();
+  });
+});
 
 const child = spawn("bun", [MCP_ENTRY], {
-  env: { ...process.env, CTC_SOCK: sockPath, CTC_CHANNEL_NAME: "smoke" },
+  env: {
+    ...process.env,
+    CLAUDE_BRIDGE_SOCK: sockPath,
+    CLAUDE_BRIDGE_CHANNEL_NAME: "smoke",
+  },
   stdio: ["pipe", "pipe", "inherit"],
 });
 

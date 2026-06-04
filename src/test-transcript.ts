@@ -10,11 +10,14 @@ import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
+  listAllTranscriptPaths,
   listTranscriptPaths,
   waitForFreshTranscript,
+  waitForFreshTranscriptForCwd,
   tailTranscript,
   sessionIdFromPath,
   projectKeyForCwd,
+  projectFolderFromTranscript,
   type TranscriptRow,
 } from "./transcript.ts";
 
@@ -30,7 +33,7 @@ ok(
     "-Users-foo-My-Project-sub.dir"
 );
 
-const projectFolder = mkdtempSync(join(tmpdir(), "ctc-tr-"));
+const projectFolder = mkdtempSync(join(tmpdir(), "claude-bridge-tr-"));
 
 const before = await listTranscriptPaths(projectFolder);
 ok("snapshot starts empty", before.size === 0);
@@ -49,6 +52,34 @@ setTimeout(() => {
 const found = await waitForFreshTranscript(projectFolder, before);
 ok("waitForFreshTranscript finds the file", found === transcriptPath);
 ok("sessionIdFromPath extracts uuid", sessionIdFromPath(found) === sessionUuid);
+ok("projectFolderFromTranscript extracts parent folder", projectFolderFromTranscript(found) === projectFolder);
+
+const existingProjectFolder = mkdtempSync(join(tmpdir(), "claude-bridge-tr-existing-"));
+const existingSessionUuid = "00000000-0000-0000-0000-000000000def";
+const existingTranscriptPath = join(existingProjectFolder, `${existingSessionUuid}.jsonl`);
+writeFileSync(
+  existingTranscriptPath,
+  JSON.stringify({ type: "system", subtype: "init", session_id: existingSessionUuid }) + "\n"
+);
+const existingFound = await waitForFreshTranscript(existingProjectFolder, new Set());
+ok("waitForFreshTranscript accepts an already-created file", existingFound === existingTranscriptPath);
+
+const allRoot = mkdtempSync(join(tmpdir(), "claude-bridge-tr-root-"));
+const allProject = join(allRoot, "project");
+mkdirSync(allProject, { recursive: true });
+const allBefore = await listAllTranscriptPaths(allRoot);
+ok("listAllTranscriptPaths starts empty", allBefore.size === 0);
+const cwdSessionUuid = "00000000-0000-0000-0000-000000000fed";
+const cwdTranscriptPath = join(allProject, `${cwdSessionUuid}.jsonl`);
+const targetCwd = mkdtempSync(join(tmpdir(), "claude-bridge-cwd-"));
+setTimeout(() => {
+  writeFileSync(
+    cwdTranscriptPath,
+    JSON.stringify({ type: "system", subtype: "init", cwd: targetCwd }) + "\n"
+  );
+}, 250);
+const cwdFound = await waitForFreshTranscriptForCwd(targetCwd, allBefore, undefined, allRoot);
+ok("waitForFreshTranscriptForCwd finds matching cwd transcript", cwdFound === cwdTranscriptPath);
 
 const seen: TranscriptRow[] = [];
 const ctrl = new AbortController();
@@ -79,6 +110,9 @@ const userCount = seen.filter(r => r.type === "user").length;
 ok("user row appears exactly once", userCount === 1);
 
 try { rmSync(projectFolder, { recursive: true, force: true }); } catch {}
+try { rmSync(existingProjectFolder, { recursive: true, force: true }); } catch {}
+try { rmSync(allRoot, { recursive: true, force: true }); } catch {}
+try { rmSync(targetCwd, { recursive: true, force: true }); } catch {}
 
 console.log("\nresult: " + (process.exitCode ? "FAIL" : "PASS"));
 process.exit(process.exitCode ?? 0);

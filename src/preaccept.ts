@@ -23,7 +23,7 @@ export function preAcceptProject(opts: { workdir: string; mcpServerNames: string
     writeFileSync(claudeJsonPath, JSON.stringify({ projects: {} }, null, 2));
   }
 
-  const backup = claudeJsonPath + ".ctc-backup";
+  const backup = claudeJsonPath + ".claude-bridge-backup";
   if (!existsSync(backup)) copyFileSync(claudeJsonPath, backup);
 
   const raw = readFileSync(claudeJsonPath, "utf8");
@@ -51,9 +51,13 @@ export function writeWorkdirSettings(workdir: string): void {
   const dir = join(workdir, ".claude");
   mkdirSync(dir, { recursive: true });
   const file = join(dir, "settings.local.json");
+  const existing = existsSync(file)
+    ? (JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>)
+    : {};
   const settings = {
+    ...existing,
     skipDangerousModePermissionPrompt: true,
     defaultMode: "bypassPermissions" as const,
   };
-  writeFileSync(file, JSON.stringify(settings, null, 2));
+  writeFileSync(file, JSON.stringify(settings, null, 2) + "\n");
 }
