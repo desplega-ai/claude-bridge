@@ -2,7 +2,7 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { claudeGlobalConfigPath, preAcceptProject } from "./preaccept.ts";
+import { claudeGlobalConfigPath, preAcceptProject, writeWorkdirSettings } from "./preaccept.ts";
 
 const ok = (label: string, cond: boolean) => {
   console.log((cond ? "PASS" : "FAIL") + " " + label);
@@ -36,6 +36,32 @@ try {
     Array.isArray(project?.approvedMcprcServers) &&
       project.approvedMcprcServers.includes("bridge")
   );
+
+  writeWorkdirSettings(workdir, { bypassPermissions: true });
+  const bypassSettings = JSON.parse(
+    readFileSync(join(workdir, ".claude", "settings.local.json"), "utf8")
+  ) as Record<string, unknown>;
+  ok("writes bypass mode for non-root runs", bypassSettings.defaultMode === "bypassPermissions");
+  ok(
+    "writes dangerous mode prompt skip for non-root runs",
+    bypassSettings.skipDangerousModePermissionPrompt === true
+  );
+
+  bypassSettings.otherSetting = "preserved";
+  await Bun.write(
+    join(workdir, ".claude", "settings.local.json"),
+    JSON.stringify(bypassSettings, null, 2) + "\n"
+  );
+  writeWorkdirSettings(workdir, { bypassPermissions: false });
+  const rootSettings = JSON.parse(
+    readFileSync(join(workdir, ".claude", "settings.local.json"), "utf8")
+  ) as Record<string, unknown>;
+  ok("removes bypass mode for root runs", !("defaultMode" in rootSettings));
+  ok(
+    "removes dangerous mode prompt skip for root runs",
+    !("skipDangerousModePermissionPrompt" in rootSettings)
+  );
+  ok("preserves unrelated settings", rootSettings.otherSetting === "preserved");
 } finally {
   if (originalConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
   else process.env.CLAUDE_CONFIG_DIR = originalConfigDir;

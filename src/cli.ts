@@ -150,7 +150,9 @@ if (jsonSchemaPath && jsonSchema) {
 }
 
 preAcceptProject({ workdir: targetCwd, mcpServerNames: [] });
-writeWorkdirSettings(targetCwd);
+const runningAsRoot = typeof process.getuid === "function" && process.getuid() === 0;
+const bypassPermissions = !runningAsRoot;
+writeWorkdirSettings(targetCwd, { bypassPermissions });
 
 const tmuxPath = resolveRequiredCommand(
   "tmux",
@@ -516,7 +518,7 @@ function failPrint(message: string, details: { rawResponse?: string } = {}): voi
 
 function startTmux(): void {
   const claudeArgs = [
-    "--dangerously-skip-permissions",
+    ...(bypassPermissions ? ["--dangerously-skip-permissions"] : []),
     ...forwardedClaudeArgs,
   ];
   const envArgs = [
@@ -537,7 +539,12 @@ function startTmux(): void {
     exitStatusPath: claudeExitStatusPath,
     holdMs: TMUX_EXIT_HOLD_MS,
   });
-  desplegaDebug("starting claude in tmux", { sessionName, claudePath, claudeArgs });
+  desplegaDebug("starting claude in tmux", {
+    sessionName,
+    claudePath,
+    claudeArgs,
+    bypassPermissions,
+  });
   const newSession = [
     "new-session",
     "-d",
@@ -700,10 +707,7 @@ function failClaudeStartup(exitStatus: string | null, pane: string): void {
 }
 
 function isClaudePaneReady(pane: string): boolean {
-  return (
-    /bypass permissions on/i.test(pane) &&
-    (CLAUDE_INPUT_PROMPT_RE.test(pane) || /-- INSERT --/.test(pane))
-  );
+  return CLAUDE_INPUT_PROMPT_RE.test(pane) || /-- INSERT --/.test(pane);
 }
 
 async function startTranscriptTail(): Promise<void> {

@@ -58,17 +58,25 @@ export function preAcceptProject(opts: { workdir: string; mcpServerNames: string
  * Per-workdir settings.json with the policy bits that skip remaining prompts.
  * Claude reads .claude/settings.local.json out of the cwd at startup.
  */
-export function writeWorkdirSettings(workdir: string): void {
+export function writeWorkdirSettings(
+  workdir: string,
+  opts: { bypassPermissions: boolean } = { bypassPermissions: true }
+): void {
   const dir = join(workdir, ".claude");
   mkdirSync(dir, { recursive: true });
   const file = join(dir, "settings.local.json");
   const existing = existsSync(file)
     ? (JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>)
     : {};
-  const settings = {
-    ...existing,
-    skipDangerousModePermissionPrompt: true,
-    defaultMode: "bypassPermissions" as const,
-  };
+  const settings = { ...existing };
+  if (opts.bypassPermissions) {
+    settings.skipDangerousModePermissionPrompt = true;
+    settings.defaultMode = "bypassPermissions";
+  } else {
+    if (settings.defaultMode === "bypassPermissions") delete settings.defaultMode;
+    if (settings.skipDangerousModePermissionPrompt === true) {
+      delete settings.skipDangerousModePermissionPrompt;
+    }
+  }
   writeFileSync(file, JSON.stringify(settings, null, 2) + "\n");
 }
