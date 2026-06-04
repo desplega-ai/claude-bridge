@@ -588,13 +588,15 @@ const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 const DEV_CHANNEL_DIALOG_RE = /(Loading development channels|Enter to confirm)/i;
 const THEME_DIALOG_RE = /(Choose the text style that looks best with your terminal|To change this later, run \/theme)/i;
 const LOGIN_METHOD_DIALOG_RE = /(Select login method|Claude account with subscription)/i;
+const SECURITY_NOTES_DIALOG_RE = /(Security notes:|Press Enter to continue)/i;
 
 /**
  * Claude may show first-run selectors before the bridge channel can load:
  *
  *   1. Theme selection on a fresh config directory.
  *   2. Login-method selection when an OAuth token is already available.
- *   3. Development-channel confirmation for our channel MCP.
+ *   3. Security notes on first authenticated startup.
+ *   4. Development-channel confirmation for our channel MCP.
  *
  * These dialogs have a safe default pre-selected for bridge usage, so Enter
  * accepts the default. Keep watching because a fresh CI runner can show theme,
@@ -637,9 +639,12 @@ async function autoAcceptStartupPrompts(): Promise<void> {
   }
 }
 
-function startupPromptFromPane(pane: string): "theme" | "login-method" | "dev-channel" | null {
+function startupPromptFromPane(
+  pane: string
+): "theme" | "login-method" | "security-notes" | "dev-channel" | null {
   if (THEME_DIALOG_RE.test(pane)) return "theme";
   if (process.env.CLAUDE_CODE_OAUTH_TOKEN && LOGIN_METHOD_DIALOG_RE.test(pane)) return "login-method";
+  if (SECURITY_NOTES_DIALOG_RE.test(pane)) return "security-notes";
   if (DEV_CHANNEL_DIALOG_RE.test(pane)) return "dev-channel";
   return null;
 }
