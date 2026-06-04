@@ -382,9 +382,9 @@ bun ./src/cli.ts -p "Return exactly a JSON object with resp set to ok." \
 
 If the secret is not available, the live smoke is skipped while the
 deterministic job still runs. Keep the token in Claude's credentials file; do
-not pass it as `CLAUDE_CODE_OAUTH_TOKEN` to the tmux-launched Claude process or
-remap it to `ANTHROPIC_AUTH_TOKEN`, because those env-token paths start Claude
-in token/API mode instead of the channel-capable credential-file path.
+not expose it to the smoke step as `CLAUDE_CODE_OAUTH_TOKEN` or remap it to
+`ANTHROPIC_AUTH_TOKEN`, because those env-token paths start Claude in token/API
+mode instead of the channel-capable credential-file path.
 
 ## Layout
 
