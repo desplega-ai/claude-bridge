@@ -81,6 +81,8 @@ env.CLAUDE_BRIDGE_PRINT_READY_TIMEOUT_MS =
   process.env.CLAUDE_BRIDGE_PRINT_READY_TIMEOUT_MS ?? "240000";
 env.CLAUDE_BRIDGE_CLAUDE_READY_TIMEOUT_MS =
   process.env.CLAUDE_BRIDGE_CLAUDE_READY_TIMEOUT_MS ?? "240000";
+env.CLAUDE_BRIDGE_TMUX_SUBMIT_DELAY_MS =
+  process.env.CLAUDE_BRIDGE_TMUX_SUBMIT_DELAY_MS ?? "1000";
 
 console.log(`bridge live smoke: output_format=${outputFormat} schema=${schema} model=${model}`);
 
