@@ -85,10 +85,15 @@ jobs:
           const os = require("node:os");
           const path = require("node:path");
 
-          const rawToken = process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "";
-          const tokenMatch = rawToken.trim().match(/sk-ant-[A-Za-z0-9_-]+/);
-          const token = tokenMatch?.[0];
-          if (!token) throw new Error("CLAUDE_CODE_OAUTH_TOKEN does not contain an sk-ant token");
+          const rawToken = (process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "").trim();
+          const token = rawToken
+            .replace(/^CLAUDE_CODE_OAUTH_TOKEN=/, "")
+            .replace(/^export CLAUDE_CODE_OAUTH_TOKEN=/, "")
+            .replace(/^['"]|['"]$/g, "")
+            .trim();
+          if (!token.startsWith("sk-ant-")) {
+            throw new Error("CLAUDE_CODE_OAUTH_TOKEN must be a Claude OAuth token from `claude setup-token`");
+          }
           console.log(`Seeding Claude OAuth token (${token.length} chars)`);
 
           const credentialsPath = path.join(os.homedir(), ".claude", ".credentials.json");
