@@ -112,5 +112,10 @@ const claudeHelp = expectOk(["--claude-help"]);
 ok("--claude-help is handled by wrapper", claudeHelp.claudeHelp);
 ok("claude help formatter nudges wrapper ownership", formatClaudeHelp("Usage: claude").includes("claude-bridge owns"));
 
+const appendFile = expectOk(["--append-system-prompt-file", "/tmp/sp.txt", "--mcp-config", "/tmp/mcp.json", "--strict-mcp-config", "-p", "hello"]);
+ok("--append-system-prompt-file consumes path value", appendFile.claudeArgs.includes("--append-system-prompt-file") && appendFile.claudeArgs.includes("/tmp/sp.txt"));
+ok("--mcp-config not eaten by --append-system-prompt-file", appendFile.claudeArgs.includes("--mcp-config") && appendFile.claudeArgs.includes("/tmp/mcp.json"));
+ok("downstream flags survive after --append-system-prompt-file", appendFile.claudeArgs.includes("--strict-mcp-config"));
+
 console.log("\nresult: " + (process.exitCode ? "FAIL" : "PASS"));
 process.exit(process.exitCode ?? 0);

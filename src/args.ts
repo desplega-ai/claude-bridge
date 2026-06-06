@@ -88,6 +88,7 @@ const OPTION_ARITY = new Map<string, OptionArity>([
   ["--allowedTools", "variadic"],
   ["--allowed-tools", "variadic"],
   ["--append-system-prompt", "required"],
+  ["--append-system-prompt-file", "required"],
   ["--bare", "none"],
   ["--betas", "variadic"],
   ["--brief", "none"],
