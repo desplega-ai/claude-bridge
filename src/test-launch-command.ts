@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildClaudeLaunchCommand, shellQuote } from "./launch-command.ts";
+import { buildClaudeLaunchCommand, buildClaudePrintLaunchCommand, shellQuote } from "./launch-command.ts";
 
 const ok = (label: string, cond: boolean) => {
   console.log((cond ? "PASS" : "FAIL") + " " + label);
@@ -56,6 +56,30 @@ ok("launch command writes exit status", readFileSync(exitStatusPath, "utf8").tri
 ok("launch command clears stale env", observed.includes("api=\n"));
 ok("launch command exports forwarded env", observed.includes("base=https://example.test\n"));
 ok("launch command preserves quoted args", observed.includes("args=--dangerously-skip-permissions --model claude's best\n"));
+
+// --- Print-mode launch command tests ---
+
+const printPromptFile = join(tempDir, "prompt.txt");
+const printStdoutFile = join(tempDir, "stdout.jsonl");
+const printExitStatusPath = join(tempDir, "print-exit-status");
+writeFileSync(printPromptFile, "say hello");
+
+const printCommand = buildClaudePrintLaunchCommand({
+  claudePath: fakeClaude,
+  claudeArgs: ["--dangerously-skip-permissions", "--model", "sonnet"],
+  unsetEnvArgs: ["-u", "ANTHROPIC_API_KEY"],
+  envArgs: ["HOME=/root"],
+  exitStatusPath: printExitStatusPath,
+  holdMs: 1,
+  promptFile: printPromptFile,
+  stdoutFile: printStdoutFile,
+});
+
+ok("print launch includes --verbose", printCommand.includes("'--verbose'"));
+ok("print launch includes --output-format stream-json",
+  printCommand.includes("'--output-format'") && printCommand.includes("'stream-json'"));
+ok("print launch includes -p flag", printCommand.includes("'-p'"));
+ok("print launch pipes prompt file to claude", printCommand.includes("cat") && printCommand.includes("prompt.txt"));
 
 rmSync(tempDir, { recursive: true, force: true });
 

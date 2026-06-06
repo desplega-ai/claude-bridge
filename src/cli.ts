@@ -721,7 +721,13 @@ async function tailPrintOutput(stdoutFile: string): Promise<void> {
 
       if (!printDone) {
         if (exitStatus !== "0") {
-          failPrint(`Claude exited with status ${exitStatus}`);
+          const stderrFile = stdoutFile.replace(/\.jsonl$/, ".stderr.log");
+          let stderrContent = "";
+          try { stderrContent = readFileSync(stderrFile, "utf8").trim(); } catch {}
+          const msg = stderrContent
+            ? `Claude exited with status ${exitStatus}: ${stderrContent}`
+            : `Claude exited with status ${exitStatus}`;
+          failPrint(msg);
         } else {
           shutdown(0);
         }

@@ -55,6 +55,7 @@ export function buildClaudePrintLaunchCommand(opts: ClaudePrintLaunchCommandOpti
     ...opts.envArgs,
     opts.claudePath,
     "-p",
+    "--verbose",
     "--output-format",
     "stream-json",
     ...opts.claudeArgs,
