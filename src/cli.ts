@@ -45,7 +45,7 @@ import {
 } from "./hook-install.ts";
 import { makePrintErrorResult } from "./print-result.ts";
 import { runJsonSchemaStopHook } from "./stop-hook.ts";
-import { buildClaudeLaunchCommand } from "./launch-command.ts";
+import { buildClaudeLaunchCommand, buildClaudePrintLaunchCommand } from "./launch-command.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..");
@@ -571,6 +571,12 @@ function startTmux(): void {
         ]
       : []),
   ];
+
+  if (printMode && initialMessage) {
+    startTmuxPrintMode(claudeArgs, envArgs);
+    return;
+  }
+
   const launchCommand = buildClaudeLaunchCommand({
     claudePath,
     claudeArgs,
@@ -607,6 +613,141 @@ function startTmux(): void {
   void waitForClaudeReady();
   void startTranscriptTail();
   if (!printMode) printBanner();
+}
+
+/**
+ * Print-mode alternative: run Claude with `-p` inside tmux and redirect
+ * stdout to a file. This avoids the broken JSONL transcript dependency
+ * (Claude Code >=2.1.x no longer writes per-session transcript files).
+ */
+function startTmuxPrintMode(claudeArgs: string[], envArgs: string[]): void {
+  const promptFile = join(runDir, "prompt.txt");
+  const stdoutFile = join(runDir, "stdout.jsonl");
+  writeFileSync(promptFile, initialMessage!);
+
+  const launchCommand = buildClaudePrintLaunchCommand({
+    claudePath,
+    claudeArgs,
+    unsetEnvArgs: claudeUnsetEnvArgs(),
+    envArgs,
+    exitStatusPath: claudeExitStatusPath,
+    holdMs: TMUX_EXIT_HOLD_MS,
+    promptFile,
+    stdoutFile,
+  });
+
+  desplegaDebug("starting claude in tmux (print mode)", {
+    sessionName,
+    claudePath,
+    claudeArgs,
+    bypassPermissions,
+    promptFile,
+    stdoutFile,
+  });
+
+  const newSession = [
+    "new-session",
+    "-d",
+    "-s",
+    sessionName,
+    "-x",
+    "220",
+    "-y",
+    "50",
+    "-c",
+    targetCwd,
+    launchCommand,
+  ];
+  const res = spawnSync(tmuxPath, newSession, { stdio: "inherit" });
+  if (res.status !== 0) {
+    process.stderr.write(`[claude-bridge] tmux new-session exited ${res.status}\n`);
+    process.exit(1);
+  }
+
+  void tailPrintOutput(stdoutFile);
+}
+
+async function tailPrintOutput(stdoutFile: string): Promise<void> {
+  const POLL_MS = 100;
+  const TIMEOUT_MS = PRINT_READY_TIMEOUT_MS + PRINT_REPLY_TIMEOUT_MS;
+  const startedAt = Date.now();
+  let byteOffset = 0;
+
+  const processNewContent = (content: string): void => {
+    const lines = content.split("\n");
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+
+      if (outputFormat === "stream-json" && !desplegaFormat) {
+        process.stdout.write(trimmed + "\n");
+        // Detect the result row to mark print as done
+        if (trimmed.startsWith('{"type":"result"')) {
+          printDone = true;
+        }
+      } else {
+        try {
+          const row = JSON.parse(trimmed) as TranscriptRow;
+          handleTranscriptRow(row, trimmed);
+        } catch {
+          // Not valid JSON — skip
+        }
+      }
+    }
+  };
+
+  while (!ctrl.signal.aborted && Date.now() - startedAt < TIMEOUT_MS) {
+    let text = "";
+    try {
+      text = readFileSync(stdoutFile, "utf8");
+    } catch {
+      // File may not exist yet — Claude hasn't started writing
+    }
+
+    if (text.length > byteOffset) {
+      processNewContent(text.substring(byteOffset));
+      byteOffset = text.length;
+    }
+
+    const exitStatus = readClaudeExitStatus();
+    if (exitStatus !== null) {
+      // Final flush — read any remaining bytes written between last poll and exit
+      try {
+        const finalText = readFileSync(stdoutFile, "utf8");
+        if (finalText.length > byteOffset) {
+          processNewContent(finalText.substring(byteOffset));
+        }
+      } catch {}
+
+      if (!printDone) {
+        if (exitStatus !== "0") {
+          const stderrFile = stdoutFile.replace(/\.jsonl$/, ".stderr.log");
+          let stderrContent = "";
+          try { stderrContent = readFileSync(stderrFile, "utf8").trim(); } catch {}
+          const msg = stderrContent
+            ? `Claude exited with status ${exitStatus}: ${stderrContent}`
+            : `Claude exited with status ${exitStatus}`;
+          failPrint(msg);
+        } else {
+          shutdown(0);
+        }
+      } else {
+        shutdown(0);
+      }
+      return;
+    }
+
+    if (printDone) {
+      shutdown(0);
+      return;
+    }
+
+    await sleep(POLL_MS);
+  }
+
+  if (!printDone) {
+    failPrint("Timed out waiting for Claude output.");
+  }
 }
 
 function capturePane(): string {
@@ -808,6 +949,16 @@ function handleTranscriptRow(row: TranscriptRow, rawLine: string): void {
       return;
     }
     finishPrintResult(lastAssistantText);
+  }
+
+  // Handle `result` rows from Claude's `-p --output-format stream-json`.
+  // These appear in print-mode stdout but not in interactive transcripts.
+  if (type === "result" && !printDone) {
+    if (typeof row.duration_ms === "number") lastTurnDurationMs = row.duration_ms;
+    const resultText = typeof row.result === "string" ? row.result : lastAssistantText;
+    if (resultText) {
+      finishPrintResult(resultText);
+    }
   }
 }
 
