@@ -521,23 +521,19 @@ function failPrint(message: string, details: { rawResponse?: string } = {}): voi
   if (printDone) return;
   printDone = true;
   clearPrintTimers();
-  if (desplegaVerbose) {
-    const pane = capturePane();
-    if (pane.trim()) {
-      desplegaDebug("tmux pane before failure", {
-        tail: pane.split("\n").slice(-80).join("\n"),
-      });
-    }
-  }
+  const failureCapture = captureFailurePane();
+  const messageWithPaneTail = appendPaneTail(message, failureCapture.paneTail);
   if (outputFormat === "text") {
-    process.stderr.write(`claude-bridge: ${message}\n`);
+    process.stderr.write(`claude-bridge: ${messageWithPaneTail}\n`);
     if (details.rawResponse !== undefined) {
       process.stderr.write(`Raw Claude reply:\n${details.rawResponse}\n`);
     }
   } else if (desplegaFormat) {
-    const result = makePrintErrorResult(message, {
+    const result = makePrintErrorResult(messageWithPaneTail, {
       rawResponse: details.rawResponse,
       sessionId: transcriptSessionId,
+      runState: runDir,
+      paneTail: failureCapture.paneTail,
       debug: outputFormat === "json" ? debugEvents : undefined,
     });
     process.stdout.write(JSON.stringify(result) + "\n");
@@ -547,8 +543,10 @@ function failPrint(message: string, details: { rawResponse?: string } = {}): voi
         type: "result",
         subtype: "error",
         is_error: true,
-        error: message,
+        error: messageWithPaneTail,
         ...(details.rawResponse !== undefined ? { raw_response: details.rawResponse } : {}),
+        run_state: runDir,
+        ...(failureCapture.paneTail ? { pane_tail: failureCapture.paneTail } : {}),
         ...(transcriptSessionId ? { session_id: transcriptSessionId } : {}),
       }) + "\n"
     );
@@ -757,6 +755,35 @@ function capturePane(): string {
   return (r.stdout ?? "") + (r.stderr ?? "");
 }
 
+function captureFailurePane(): { pane: string; paneTail: string; path: string } {
+  const path = join(runDir, "tmux-pane-final.txt");
+  const r = spawnSync(tmuxPath, ["capture-pane", "-pt", sessionName, "-S", "-"], {
+    encoding: "utf8",
+  });
+  const pane = ((r.stdout ?? "") + (r.stderr ?? "")).trimEnd();
+  try {
+    writeFileSync(path, pane ? pane + "\n" : "");
+  } catch (err) {
+    desplegaDebug("failed to write final tmux pane capture", {
+      path,
+      error: (err as Error).message,
+    });
+  }
+  const paneTail = tailLines(pane, 40);
+  if (paneTail) {
+    desplegaDebug("tmux pane before failure", { path, tail: paneTail });
+  }
+  return { pane, paneTail, path };
+}
+
+function appendPaneTail(message: string, paneTail: string): string {
+  return paneTail ? `${message}\nPane tail:\n${paneTail}` : message;
+}
+
+function tailLines(text: string, count: number): string {
+  return text.trim().split("\n").filter(Boolean).slice(-count).join("\n");
+}
+
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 const THEME_DIALOG_RE = /(Choose the text style that looks best with your terminal|To change this later, run \/theme)/i;
 const SECURITY_NOTES_DIALOG_RE = /(Security notes:|Press Enter to continue)/i;
@@ -871,11 +898,12 @@ function tmuxSessionExists(): boolean {
 
 function failClaudeStartup(exitStatus: string | null, pane: string): void {
   const statusText = exitStatus === null ? "the tmux session exited" : `Claude exited with status ${exitStatus}`;
-  const paneTail = pane.trim() ? pane.split("\n").slice(-20).join("\n") : "";
   const message = `${statusText} before Claude became ready. Run state: ${runDir}. Check \`${claudePath} -v\` and Claude auth on this host.`;
   if (printMode) {
-    failPrint(paneTail ? `${message}\nPane tail:\n${paneTail}` : message);
+    failPrint(message);
   } else {
+    const failureCapture = captureFailurePane();
+    const paneTail = failureCapture.paneTail || tailLines(pane, 40);
     stdoutLine({
       type: "bridge_error",
       where: "claude-startup",
