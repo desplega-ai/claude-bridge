@@ -2,6 +2,8 @@ export type PrintErrorResultOptions = {
   sessionId?: string;
   debug?: Record<string, unknown>[];
   rawResponse?: string;
+  runState?: string;
+  paneTail?: string;
 };
 
 export function makePrintErrorResult(
@@ -14,6 +16,8 @@ export function makePrintErrorResult(
     is_error: true,
     error: message,
     ...(options.rawResponse !== undefined ? { raw_response: options.rawResponse } : {}),
+    ...(options.runState ? { run_state: options.runState } : {}),
+    ...(options.paneTail ? { pane_tail: options.paneTail } : {}),
     ...(options.sessionId ? { session_id: options.sessionId } : {}),
     ...(options.debug?.length ? { debug: options.debug } : {}),
   };
