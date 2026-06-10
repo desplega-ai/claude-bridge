@@ -144,6 +144,7 @@ const PRINT_REPLY_TIMEOUT_MS = envDurationMs("CLAUDE_BRIDGE_PRINT_REPLY_TIMEOUT_
 const CLAUDE_READY_TIMEOUT_MS = envDurationMs("CLAUDE_BRIDGE_CLAUDE_READY_TIMEOUT_MS", 180_000);
 const TMUX_SUBMIT_DELAY_MS = envDurationMs("CLAUDE_BRIDGE_TMUX_SUBMIT_DELAY_MS", 1_000);
 const TMUX_EXIT_HOLD_MS = envDurationMs("CLAUDE_BRIDGE_TMUX_EXIT_HOLD_MS", 30_000);
+const MAX_SESSION_MS = envDurationMs("CLAUDE_BRIDGE_MAX_SESSION_MS", 2 * 60 * 60_000);
 
 if (jsonSchemaPath && jsonSchema) {
   writeFileSync(jsonSchemaPath, jsonSchema.compact + "\n");
@@ -539,11 +540,16 @@ function failPrint(message: string, details: { rawResponse?: string } = {}): voi
       process.stderr.write(`Raw Claude reply:\n${details.rawResponse}\n`);
     }
   } else if (desplegaFormat) {
+    let stderrLog: string | undefined;
+    if (printMode) {
+      try { stderrLog = readFileSync(join(runDir, "stdout.stderr.log"), "utf8").trim() || undefined; } catch {}
+    }
     const result = makePrintErrorResult(messageWithPaneTail, {
       rawResponse: details.rawResponse,
       sessionId: transcriptSessionId,
       runState: runDir,
       paneTail: failureCapture.paneTail,
+      stderrLog,
       debug: outputFormat === "json" ? debugEvents : undefined,
     });
     process.stdout.write(JSON.stringify(result) + "\n");
@@ -677,7 +683,6 @@ function startTmuxPrintMode(claudeArgs: string[], envArgs: string[]): void {
 
 async function tailPrintOutput(stdoutFile: string): Promise<void> {
   const POLL_MS = 100;
-  const TIMEOUT_MS = PRINT_READY_TIMEOUT_MS + PRINT_REPLY_TIMEOUT_MS;
   const startedAt = Date.now();
   let byteOffset = 0;
 
@@ -704,7 +709,7 @@ async function tailPrintOutput(stdoutFile: string): Promise<void> {
     }
   };
 
-  while (!ctrl.signal.aborted && Date.now() - startedAt < TIMEOUT_MS) {
+  while (!ctrl.signal.aborted && Date.now() - startedAt < MAX_SESSION_MS) {
     let text = "";
     try {
       text = readFileSync(stdoutFile, "utf8");
@@ -734,14 +739,15 @@ async function tailPrintOutput(stdoutFile: string): Promise<void> {
 
       if (!printDone) {
         if (exitStatus !== "0") {
-          const stderrFile = stdoutFile.replace(/\.jsonl$/, ".stderr.log");
-          let stderrContent = "";
-          try { stderrContent = readFileSync(stderrFile, "utf8").trim(); } catch {}
+          const stderrContent = readStderrLog(stdoutFile);
           const msg = stderrContent
             ? `Claude exited with status ${exitStatus}: ${stderrContent}`
             : `Claude exited with status ${exitStatus}`;
           failPrint(msg);
+        } else if (lastAssistantText) {
+          finishPrintResult(lastAssistantText);
         } else {
+          desplegaDebug("claude exited 0 with no output — clean shutdown");
           shutdown(0);
         }
       } else {
@@ -759,7 +765,23 @@ async function tailPrintOutput(stdoutFile: string): Promise<void> {
   }
 
   if (!printDone) {
-    failPrint("Timed out waiting for Claude output.");
+    const elapsed = Math.round((Date.now() - startedAt) / 1000);
+    const stderrContent = readStderrLog(stdoutFile);
+    const detail = stderrContent
+      ? `stderr: ${stderrContent}`
+      : "no stderr output captured";
+    failPrint(
+      `Session safety ceiling reached after ${elapsed}s (CLAUDE_BRIDGE_MAX_SESSION_MS=${MAX_SESSION_MS}). ${detail}`
+    );
+  }
+}
+
+function readStderrLog(stdoutFile: string): string {
+  const stderrFile = stdoutFile.replace(/\.jsonl$/, ".stderr.log");
+  try {
+    return readFileSync(stderrFile, "utf8").trim();
+  } catch {
+    return "";
   }
 }
 
@@ -785,9 +807,16 @@ function captureFailurePane(): { pane: string; paneTail: string; path: string } 
       error: (err as Error).message,
     });
   }
-  const paneTail = tailLines(pane, 40);
+  let paneTail = tailLines(pane, 40);
+  if (printMode && !paneTail) {
+    const stderrFile = join(runDir, "stdout.stderr.log");
+    try {
+      const stderr = readFileSync(stderrFile, "utf8").trim();
+      if (stderr) paneTail = `[stderr.log] ${tailLines(stderr, 40)}`;
+    } catch {}
+  }
   if (paneTail) {
-    desplegaDebug("tmux pane before failure", { path, tail: paneTail });
+    desplegaDebug("diagnostics before failure", { path, tail: paneTail });
   }
   return { pane, paneTail, path };
 }
