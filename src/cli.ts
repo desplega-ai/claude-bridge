@@ -174,6 +174,9 @@ let transcriptSessionId: string | undefined;
 let lastAssistantText = "";
 let lastAssistantRow: TranscriptRow | null = null;
 let lastTurnDurationMs: number | undefined;
+let pendingPrintResultText = "";
+let pendingPrintFailure: { message: string; rawResponse?: string } | null = null;
+let streamJsonResultSeen = false;
 let printDone = false;
 let printReadyTimer: ReturnType<typeof setTimeout> | null = null;
 let printReplyTimer: ReturnType<typeof setTimeout> | null = null;
@@ -694,9 +697,9 @@ async function tailPrintOutput(stdoutFile: string): Promise<void> {
 
       if (outputFormat === "stream-json" && !desplegaFormat) {
         process.stdout.write(trimmed + "\n");
-        // Detect the result row to mark print as done
+        // Detect the result row, but still wait for claude-exit-status.
         if (trimmed.startsWith('{"type":"result"')) {
-          printDone = true;
+          streamJsonResultSeen = true;
         }
       } else {
         try {
@@ -737,27 +740,22 @@ async function tailPrintOutput(stdoutFile: string): Promise<void> {
         }
       } catch {}
 
-      if (!printDone) {
-        if (exitStatus !== "0") {
-          const stderrContent = readStderrLog(stdoutFile);
-          const msg = stderrContent
-            ? `Claude exited with status ${exitStatus}: ${stderrContent}`
-            : `Claude exited with status ${exitStatus}`;
-          failPrint(msg);
-        } else if (lastAssistantText) {
-          finishPrintResult(lastAssistantText);
-        } else {
-          desplegaDebug("claude exited 0 with no output — clean shutdown");
-          shutdown(0);
-        }
+      if (exitStatus !== "0") {
+        const stderrContent = readStderrLog(stdoutFile);
+        const msg = stderrContent
+          ? `Claude exited with status ${exitStatus}: ${stderrContent}`
+          : `Claude exited with status ${exitStatus}`;
+        failPrint(msg);
+      } else if (printDone || streamJsonResultSeen) {
+        shutdown(0);
+      } else if (pendingPrintFailure) {
+        failPrint(pendingPrintFailure.message, { rawResponse: pendingPrintFailure.rawResponse });
+      } else if (pendingPrintResultText || lastAssistantText) {
+        finishPrintResult(pendingPrintResultText || lastAssistantText);
       } else {
+        desplegaDebug("claude exited 0 with no output — clean shutdown");
         shutdown(0);
       }
-      return;
-    }
-
-    if (printDone) {
-      shutdown(0);
       return;
     }
 
@@ -1018,12 +1016,14 @@ function handleTranscriptRow(row: TranscriptRow, rawLine: string): void {
   if (type === "system" && row.subtype === "turn_duration") {
     if (typeof row.durationMs === "number") lastTurnDurationMs = row.durationMs;
     if (!lastAssistantText) {
-      failPrint("Claude reached turn end without assistant text.", {
+      pendingPrintFailure = {
+        message: "Claude reached turn end without assistant text.",
         rawResponse: lastAssistantText,
-      });
+      };
       return;
     }
-    finishPrintResult(lastAssistantText);
+    pendingPrintResultText = lastAssistantText;
+    return;
   }
 
   // Handle `result` rows from Claude's `-p --output-format stream-json`.
@@ -1032,7 +1032,7 @@ function handleTranscriptRow(row: TranscriptRow, rawLine: string): void {
     if (typeof row.duration_ms === "number") lastTurnDurationMs = row.duration_ms;
     const resultText = typeof row.result === "string" ? row.result : lastAssistantText;
     if (resultText) {
-      finishPrintResult(resultText);
+      pendingPrintResultText = resultText;
     }
   }
 }
