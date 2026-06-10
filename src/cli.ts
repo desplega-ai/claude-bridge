@@ -703,6 +703,11 @@ async function tailPrintOutput(stdoutFile: string): Promise<void> {
     }
 
     if (text.length > byteOffset) {
+      if (byteOffset === 0) {
+        clearPrintReadyTimer();
+        if (!printReplyTimer) startPrintReplyTimer();
+        desplegaDebug("claude output detected, ready timer cleared");
+      }
       processNewContent(text.substring(byteOffset));
       byteOffset = text.length;
     }
@@ -756,6 +761,7 @@ function capturePane(): string {
 }
 
 function captureFailurePane(): { pane: string; paneTail: string; path: string } {
+  paneCaptured = true;
   const path = join(runDir, "tmux-pane-final.txt");
   const r = spawnSync(tmuxPath, ["capture-pane", "-pt", sessionName, "-S", "-"], {
     encoding: "utf8",
@@ -786,9 +792,10 @@ function tailLines(text: string, count: number): string {
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 const THEME_DIALOG_RE = /(Choose the text style that looks best with your terminal|To change this later, run \/theme)/i;
-const SECURITY_NOTES_DIALOG_RE = /(Security notes:|Press Enter to continue)/i;
+const SECURITY_NOTES_DIALOG_RE = /(Security notes:|Security guide|Press Enter to continue|Enter to confirm)/i;
 const CUSTOM_API_KEY_DIALOG_RE = /(Detected a custom API key in your environment|Do you want to use this API key\?)/i;
-const CLAUDE_INPUT_PROMPT_RE = /(^|\n)\s*(?:❯|>)[^\n]*(?:\n|$)/;
+const TRUST_DIALOG_RE = /(Quick safety check|Is this a project you created|Yes, I trust this folder)/i;
+const CLAUDE_INPUT_PROMPT_RE = /(^|\n)\s*(?:❯|>)\s*(?!\d+\.\s)[^\n]*(?:\n|$)/;
 
 /**
  * Claude may show first-run selectors before the input prompt is available:
@@ -843,10 +850,11 @@ async function autoAcceptStartupPrompts(): Promise<void> {
 
 function startupPromptFromPane(
   pane: string
-): "theme" | "security-notes" | "custom-api-key" | null {
+): "theme" | "security-notes" | "custom-api-key" | "trust" | null {
   if (hasDesplegaFlag("local-auth") && CUSTOM_API_KEY_DIALOG_RE.test(pane)) {
     return "custom-api-key";
   }
+  if (TRUST_DIALOG_RE.test(pane)) return "trust";
   if (THEME_DIALOG_RE.test(pane)) return "theme";
   if (SECURITY_NOTES_DIALOG_RE.test(pane)) return "security-notes";
   return null;
@@ -1047,11 +1055,15 @@ function startRepl(): void {
 }
 
 let shuttingDown = false;
+let paneCaptured = false;
 function shutdown(exitCode = 0): void {
   if (shuttingDown) return;
   shuttingDown = true;
   clearPrintTimers();
   ctrl.abort();
+  if (!paneCaptured && exitCode !== 0) {
+    captureFailurePane();
+  }
   spawn(tmuxPath, ["kill-session", "-t", sessionName], { stdio: "ignore" }).on("exit", () =>
     process.exit(exitCode)
   );
