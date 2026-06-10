@@ -12,7 +12,7 @@
  * Attach to the live Claude UI from another terminal with:
  *     tmux attach -t <session-name>
  */
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
@@ -495,7 +495,17 @@ function startPrintReplyTimer(): void {
   if (!printMode || printReplyTimer) return;
   printReplyTimer = setTimeout(() => {
     failPrint(
-      `Timed out after ${PRINT_REPLY_TIMEOUT_MS / 1000}s waiting for a reply from Claude.`
+      `Timed out after ${PRINT_REPLY_TIMEOUT_MS / 1000}s of inactivity waiting for Claude output.`
+    );
+  }, PRINT_REPLY_TIMEOUT_MS);
+}
+
+function resetPrintReplyTimer(): void {
+  clearPrintReplyTimer();
+  if (!printMode) return;
+  printReplyTimer = setTimeout(() => {
+    failPrint(
+      `Timed out after ${PRINT_REPLY_TIMEOUT_MS / 1000}s of inactivity waiting for Claude output.`
     );
   }, PRINT_REPLY_TIMEOUT_MS);
 }
@@ -705,9 +715,9 @@ async function tailPrintOutput(stdoutFile: string): Promise<void> {
     if (text.length > byteOffset) {
       if (byteOffset === 0) {
         clearPrintReadyTimer();
-        if (!printReplyTimer) startPrintReplyTimer();
         desplegaDebug("claude output detected, ready timer cleared");
       }
+      resetPrintReplyTimer();
       processNewContent(text.substring(byteOffset));
       byteOffset = text.length;
     }
@@ -1064,10 +1074,8 @@ function shutdown(exitCode = 0): void {
   if (!paneCaptured && exitCode !== 0) {
     captureFailurePane();
   }
-  spawn(tmuxPath, ["kill-session", "-t", sessionName], { stdio: "ignore" }).on("exit", () =>
-    process.exit(exitCode)
-  );
-  setTimeout(() => process.exit(exitCode), 1500);
+  spawnSync(tmuxPath, ["kill-session", "-t", sessionName], { stdio: "ignore" });
+  process.exit(exitCode);
 }
 
 desplegaDebug("run state created", { runDir });
