@@ -23,5 +23,9 @@ ok("error result includes run state", withRaw.run_state === "/tmp/.claude-bridge
 ok("error result includes pane tail", withRaw.pane_tail === "blocked startup prompt");
 ok("error result includes debug", Array.isArray(withRaw.debug));
 
+const withStderr = makePrintErrorResult("bad", { stderrLog: "some stderr content" });
+ok("error result includes stderr_log", withStderr.stderr_log === "some stderr content");
+ok("error result omits stderr_log when absent", !("stderr_log" in withoutRaw));
+
 console.log("\nresult: " + (process.exitCode ? "FAIL" : "PASS"));
 process.exit(process.exitCode ?? 0);

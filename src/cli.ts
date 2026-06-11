@@ -144,6 +144,7 @@ const PRINT_REPLY_TIMEOUT_MS = envDurationMs("CLAUDE_BRIDGE_PRINT_REPLY_TIMEOUT_
 const CLAUDE_READY_TIMEOUT_MS = envDurationMs("CLAUDE_BRIDGE_CLAUDE_READY_TIMEOUT_MS", 180_000);
 const TMUX_SUBMIT_DELAY_MS = envDurationMs("CLAUDE_BRIDGE_TMUX_SUBMIT_DELAY_MS", 1_000);
 const TMUX_EXIT_HOLD_MS = envDurationMs("CLAUDE_BRIDGE_TMUX_EXIT_HOLD_MS", 30_000);
+const MAX_SESSION_MS = envDurationMs("CLAUDE_BRIDGE_MAX_SESSION_MS", 2 * 60 * 60_000);
 
 if (jsonSchemaPath && jsonSchema) {
   writeFileSync(jsonSchemaPath, jsonSchema.compact + "\n");
@@ -173,6 +174,9 @@ let transcriptSessionId: string | undefined;
 let lastAssistantText = "";
 let lastAssistantRow: TranscriptRow | null = null;
 let lastTurnDurationMs: number | undefined;
+let pendingPrintResultText = "";
+let pendingPrintFailure: { message: string; rawResponse?: string } | null = null;
+let streamJsonResultSeen = false;
 let printDone = false;
 let printReadyTimer: ReturnType<typeof setTimeout> | null = null;
 let printReplyTimer: ReturnType<typeof setTimeout> | null = null;
@@ -539,11 +543,16 @@ function failPrint(message: string, details: { rawResponse?: string } = {}): voi
       process.stderr.write(`Raw Claude reply:\n${details.rawResponse}\n`);
     }
   } else if (desplegaFormat) {
+    let stderrLog: string | undefined;
+    if (printMode) {
+      try { stderrLog = readFileSync(join(runDir, "stdout.stderr.log"), "utf8").trim() || undefined; } catch {}
+    }
     const result = makePrintErrorResult(messageWithPaneTail, {
       rawResponse: details.rawResponse,
       sessionId: transcriptSessionId,
       runState: runDir,
       paneTail: failureCapture.paneTail,
+      stderrLog,
       debug: outputFormat === "json" ? debugEvents : undefined,
     });
     process.stdout.write(JSON.stringify(result) + "\n");
@@ -677,7 +686,6 @@ function startTmuxPrintMode(claudeArgs: string[], envArgs: string[]): void {
 
 async function tailPrintOutput(stdoutFile: string): Promise<void> {
   const POLL_MS = 100;
-  const TIMEOUT_MS = PRINT_READY_TIMEOUT_MS + PRINT_REPLY_TIMEOUT_MS;
   const startedAt = Date.now();
   let byteOffset = 0;
 
@@ -689,9 +697,9 @@ async function tailPrintOutput(stdoutFile: string): Promise<void> {
 
       if (outputFormat === "stream-json" && !desplegaFormat) {
         process.stdout.write(trimmed + "\n");
-        // Detect the result row to mark print as done
+        // Detect the result row, but still wait for claude-exit-status.
         if (trimmed.startsWith('{"type":"result"')) {
-          printDone = true;
+          streamJsonResultSeen = true;
         }
       } else {
         try {
@@ -704,7 +712,7 @@ async function tailPrintOutput(stdoutFile: string): Promise<void> {
     }
   };
 
-  while (!ctrl.signal.aborted && Date.now() - startedAt < TIMEOUT_MS) {
+  while (!ctrl.signal.aborted && Date.now() - startedAt < MAX_SESSION_MS) {
     let text = "";
     try {
       text = readFileSync(stdoutFile, "utf8");
@@ -732,26 +740,22 @@ async function tailPrintOutput(stdoutFile: string): Promise<void> {
         }
       } catch {}
 
-      if (!printDone) {
-        if (exitStatus !== "0") {
-          const stderrFile = stdoutFile.replace(/\.jsonl$/, ".stderr.log");
-          let stderrContent = "";
-          try { stderrContent = readFileSync(stderrFile, "utf8").trim(); } catch {}
-          const msg = stderrContent
-            ? `Claude exited with status ${exitStatus}: ${stderrContent}`
-            : `Claude exited with status ${exitStatus}`;
-          failPrint(msg);
-        } else {
-          shutdown(0);
-        }
+      if (exitStatus !== "0") {
+        const stderrContent = readStderrLog(stdoutFile);
+        const msg = stderrContent
+          ? `Claude exited with status ${exitStatus}: ${stderrContent}`
+          : `Claude exited with status ${exitStatus}`;
+        failPrint(msg);
+      } else if (printDone || streamJsonResultSeen) {
+        shutdown(0);
+      } else if (pendingPrintFailure) {
+        failPrint(pendingPrintFailure.message, { rawResponse: pendingPrintFailure.rawResponse });
+      } else if (pendingPrintResultText || lastAssistantText) {
+        finishPrintResult(pendingPrintResultText || lastAssistantText);
       } else {
+        desplegaDebug("claude exited 0 with no output — clean shutdown");
         shutdown(0);
       }
-      return;
-    }
-
-    if (printDone) {
-      shutdown(0);
       return;
     }
 
@@ -759,7 +763,23 @@ async function tailPrintOutput(stdoutFile: string): Promise<void> {
   }
 
   if (!printDone) {
-    failPrint("Timed out waiting for Claude output.");
+    const elapsed = Math.round((Date.now() - startedAt) / 1000);
+    const stderrContent = readStderrLog(stdoutFile);
+    const detail = stderrContent
+      ? `stderr: ${stderrContent}`
+      : "no stderr output captured";
+    failPrint(
+      `Session safety ceiling reached after ${elapsed}s (CLAUDE_BRIDGE_MAX_SESSION_MS=${MAX_SESSION_MS}). ${detail}`
+    );
+  }
+}
+
+function readStderrLog(stdoutFile: string): string {
+  const stderrFile = stdoutFile.replace(/\.jsonl$/, ".stderr.log");
+  try {
+    return readFileSync(stderrFile, "utf8").trim();
+  } catch {
+    return "";
   }
 }
 
@@ -785,9 +805,16 @@ function captureFailurePane(): { pane: string; paneTail: string; path: string } 
       error: (err as Error).message,
     });
   }
-  const paneTail = tailLines(pane, 40);
+  let paneTail = tailLines(pane, 40);
+  if (printMode && !paneTail) {
+    const stderrFile = join(runDir, "stdout.stderr.log");
+    try {
+      const stderr = readFileSync(stderrFile, "utf8").trim();
+      if (stderr) paneTail = `[stderr.log] ${tailLines(stderr, 40)}`;
+    } catch {}
+  }
   if (paneTail) {
-    desplegaDebug("tmux pane before failure", { path, tail: paneTail });
+    desplegaDebug("diagnostics before failure", { path, tail: paneTail });
   }
   return { pane, paneTail, path };
 }
@@ -989,12 +1016,14 @@ function handleTranscriptRow(row: TranscriptRow, rawLine: string): void {
   if (type === "system" && row.subtype === "turn_duration") {
     if (typeof row.durationMs === "number") lastTurnDurationMs = row.durationMs;
     if (!lastAssistantText) {
-      failPrint("Claude reached turn end without assistant text.", {
+      pendingPrintFailure = {
+        message: "Claude reached turn end without assistant text.",
         rawResponse: lastAssistantText,
-      });
+      };
       return;
     }
-    finishPrintResult(lastAssistantText);
+    pendingPrintResultText = lastAssistantText;
+    return;
   }
 
   // Handle `result` rows from Claude's `-p --output-format stream-json`.
@@ -1003,7 +1032,7 @@ function handleTranscriptRow(row: TranscriptRow, rawLine: string): void {
     if (typeof row.duration_ms === "number") lastTurnDurationMs = row.duration_ms;
     const resultText = typeof row.result === "string" ? row.result : lastAssistantText;
     if (resultText) {
-      finishPrintResult(resultText);
+      pendingPrintResultText = resultText;
     }
   }
 }

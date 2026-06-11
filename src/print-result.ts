@@ -4,6 +4,7 @@ export type PrintErrorResultOptions = {
   rawResponse?: string;
   runState?: string;
   paneTail?: string;
+  stderrLog?: string;
 };
 
 export function makePrintErrorResult(
@@ -18,6 +19,7 @@ export function makePrintErrorResult(
     ...(options.rawResponse !== undefined ? { raw_response: options.rawResponse } : {}),
     ...(options.runState ? { run_state: options.runState } : {}),
     ...(options.paneTail ? { pane_tail: options.paneTail } : {}),
+    ...(options.stderrLog ? { stderr_log: options.stderrLog } : {}),
     ...(options.sessionId ? { session_id: options.sessionId } : {}),
     ...(options.debug?.length ? { debug: options.debug } : {}),
   };
