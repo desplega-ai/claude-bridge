@@ -686,7 +686,9 @@ function startTmuxPrintMode(claudeArgs: string[], envArgs: string[]): void {
 
 async function tailPrintOutput(stdoutFile: string): Promise<void> {
   const POLL_MS = 100;
+  const TMUX_LIVENESS_CHECK_MS = 1000;
   const startedAt = Date.now();
+  let lastTmuxCheckAt = 0;
   let byteOffset = 0;
 
   const processNewContent = (content: string): void => {
@@ -757,6 +759,21 @@ async function tailPrintOutput(stdoutFile: string): Promise<void> {
         shutdown(0);
       }
       return;
+    }
+
+    const now = Date.now();
+    if (
+      !printDone &&
+      !streamJsonResultSeen &&
+      now - lastTmuxCheckAt >= TMUX_LIVENESS_CHECK_MS
+    ) {
+      lastTmuxCheckAt = now;
+      if (!tmuxSessionExists()) {
+        failPrint(
+          "tmux session/server died before Claude produced a result - likely OOM-killed or container restart."
+        );
+        return;
+      }
     }
 
     await sleep(POLL_MS);
