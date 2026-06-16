@@ -16,6 +16,7 @@ import {
   waitForFreshTranscript,
   waitForFreshTranscriptForCwd,
   tailTranscript,
+  tailTranscriptLines,
   sessionIdFromPath,
   projectKeyForCwd,
   projectFolderFromTranscript,
@@ -112,6 +113,21 @@ ok("user row appears exactly once", userCount === 1);
 
 const rawLines = await readTranscriptLines(transcriptPath);
 ok("readTranscriptLines preserves raw JSONL lines", rawLines[2]?.includes("\"assistant\"") === true);
+
+const partialPath = join(projectFolder, "partial.jsonl");
+writeFileSync(partialPath, "");
+const partialCtrl = new AbortController();
+const partialLines: string[] = [];
+const partialTail = tailTranscriptLines(partialPath, line => partialLines.push(line), partialCtrl.signal);
+appendFileSync(partialPath, JSON.stringify({ type: "user", message: "partial" }));
+await new Promise(r => setTimeout(r, 250));
+ok("tailTranscriptLines buffers partial line", partialLines.length === 0);
+appendFileSync(partialPath, "\n" + JSON.stringify({ type: "assistant", message: "complete" }) + "\n");
+await new Promise(r => setTimeout(r, 250));
+partialCtrl.abort();
+await partialTail;
+ok("tailTranscriptLines emits completed partial after newline", partialLines[0]?.includes("\"partial\"") === true);
+ok("tailTranscriptLines emits later complete line", partialLines[1]?.includes("\"assistant\"") === true);
 
 try { rmSync(projectFolder, { recursive: true, force: true }); } catch {}
 try { rmSync(existingProjectFolder, { recursive: true, force: true }); } catch {}

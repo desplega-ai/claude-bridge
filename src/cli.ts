@@ -27,6 +27,7 @@ import {
   readTranscriptLines,
   sessionIdFromPath,
   tailTranscript,
+  tailTranscriptLines,
   waitForFreshTranscriptForCwd,
   type TranscriptRow,
 } from "./transcript.ts";
@@ -151,6 +152,7 @@ const TMUX_EXIT_HOLD_MS = envDurationMs("CLAUDE_BRIDGE_TMUX_EXIT_HOLD_MS", 30_00
 const MAX_SESSION_MS = envDurationMs("CLAUDE_BRIDGE_MAX_SESSION_MS", 2 * 60 * 60_000);
 const stopEventPath = join(runDir, "stop-event.json");
 const messageDisplayPath = join(runDir, "message-display.jsonl");
+const transcriptEventPath = join(runDir, "transcript-event.json");
 
 if (jsonSchemaPath && jsonSchema) {
   writeFileSync(jsonSchemaPath, jsonSchema.compact + "\n");
@@ -185,6 +187,8 @@ let pendingPrintResultText = "";
 let pendingPrintFailure: { message: string; rawResponse?: string } | null = null;
 let printDone = false;
 let messageDisplayOffset = 0;
+let streamJsonTranscriptLineCount = 0;
+let streamJsonTranscriptHasResult = false;
 
 let rlRef: import("node:readline").Interface | null = null;
 const stdoutLine = (obj: Record<string, unknown>): void => {
@@ -630,7 +634,7 @@ async function waitForPrintTurnEnd(): Promise<void> {
           failPrint(streamResult.message, { rawResponse: streamResult.rawResponse });
           return;
         }
-        await emitTranscriptJsonLines(stopEvent, streamResult.result);
+        await emitTranscriptJsonLines(stopEvent, streamResult.result, streamJsonTranscriptLineCount);
       }
       finishPrintResult(resultText);
       return;
@@ -704,10 +708,15 @@ function makeStreamJsonResultEvent(
 
 async function emitTranscriptJsonLines(
   stopEvent: RuntimeStopEvent,
-  resultEvent: Record<string, unknown>
+  resultEvent: Record<string, unknown>,
+  alreadyEmitted = 0
 ): Promise<void> {
   const transcriptPath = stopEvent.transcript_path;
   if (!transcriptPath) {
+    if (alreadyEmitted > 0) {
+      if (!streamJsonTranscriptHasResult) process.stdout.write(JSON.stringify(resultEvent) + "\n");
+      return;
+    }
     failPrint("Claude Stop hook fired without transcript_path for stream-json output.");
     return;
   }
@@ -720,13 +729,16 @@ async function emitTranscriptJsonLines(
     return;
   }
 
-  if (lines.length === 0) {
+  if (lines.length === 0 && alreadyEmitted === 0) {
     failPrint(`Claude transcript was empty for stream-json output: ${transcriptPath}`);
     return;
   }
 
-  let hasResult = false;
-  for (const line of lines) process.stdout.write(line + "\n");
+  let hasResult = streamJsonTranscriptHasResult;
+  for (const line of lines.slice(alreadyEmitted)) {
+    process.stdout.write(line + "\n");
+    streamJsonTranscriptLineCount++;
+  }
   for (const line of lines) {
     try {
       const row = JSON.parse(line) as { type?: unknown };
@@ -946,10 +958,19 @@ function isClaudePaneReady(pane: string): boolean {
 }
 
 async function startTranscriptTail(): Promise<void> {
+  const compatStreamJsonPrint = printMode && outputFormat === "stream-json" && !desplegaFormat;
   let transcriptPath: string;
   try {
-    transcriptPath = await waitForFreshTranscriptForCwd(targetCwd, transcriptsBefore, ctrl.signal);
+    transcriptPath =
+      (compatStreamJsonPrint ? await waitForRuntimeTranscriptPath(1_500) : null) ??
+      await waitForFreshTranscriptForCwd(targetCwd, transcriptsBefore, ctrl.signal);
   } catch (err) {
+    if (compatStreamJsonPrint) {
+      desplegaDebug("live stream-json transcript discovery failed; falling back to Stop-time transcript flush", {
+        error: (err as Error).message,
+      });
+      return;
+    }
     if (printMode) {
       failPrint((err as Error).message);
       return;
@@ -966,11 +987,52 @@ async function startTranscriptTail(): Promise<void> {
   const sessionId = sessionIdFromPath(transcriptPath);
   transcriptSessionId = sessionId;
   stdoutLine({ type: "transcript_open", path: transcriptPath, session_id: sessionId });
+  if (compatStreamJsonPrint) {
+    await tailTranscriptLines(
+      transcriptPath,
+      (line: string) => {
+        process.stdout.write(line + "\n");
+        streamJsonTranscriptLineCount++;
+        let row: TranscriptRow;
+        try {
+          row = JSON.parse(line) as TranscriptRow;
+          if (row.type === "result") streamJsonTranscriptHasResult = true;
+        } catch {
+          row = { type: "bridge_parse_error", line };
+        }
+        handleTranscriptRow(row, line);
+      },
+      ctrl.signal
+    );
+    return;
+  }
   await tailTranscript(
     transcriptPath,
     (row: TranscriptRow, _index: number, rawLine: string) => handleTranscriptRow(row, rawLine),
     ctrl.signal
   );
+}
+
+async function waitForRuntimeTranscriptPath(timeoutMs: number): Promise<string | null> {
+  const startedAt = Date.now();
+  while (!ctrl.signal.aborted && Date.now() - startedAt < timeoutMs) {
+    const path = readRuntimeTranscriptPath();
+    if (path) return path;
+    await sleep(50);
+  }
+  return null;
+}
+
+function readRuntimeTranscriptPath(): string | null {
+  if (!existsSync(transcriptEventPath)) return null;
+  try {
+    const event = JSON.parse(readFileSync(transcriptEventPath, "utf8")) as RuntimeStopEvent;
+    return typeof event.transcript_path === "string" && event.transcript_path
+      ? event.transcript_path
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function handleTranscriptRow(row: TranscriptRow, _rawLine: string): void {

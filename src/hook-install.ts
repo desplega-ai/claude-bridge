@@ -61,6 +61,21 @@ export function installRuntimeHooks(opts: {
     opts.command,
     RUNTIME_HOOK_ARG
   );
+  settings.hooks.UserPromptSubmit = upsertBridgeHook(
+    settings.hooks.UserPromptSubmit ?? [],
+    opts.command,
+    RUNTIME_HOOK_ARG
+  );
+  settings.hooks.SessionStart = upsertBridgeHook(
+    settings.hooks.SessionStart ?? [],
+    opts.command,
+    RUNTIME_HOOK_ARG
+  );
+  settings.hooks.PreToolUse = upsertBridgeHook(
+    settings.hooks.PreToolUse ?? [],
+    opts.command,
+    RUNTIME_HOOK_ARG
+  );
 
   const changed = before !== JSON.stringify(settings.hooks);
   if (changed) writeSettings(settingsPath, settings);

@@ -11,6 +11,7 @@
 import { Glob } from "bun";
 import { join, basename, dirname, resolve } from "node:path";
 import { homedir } from "node:os";
+import { readFileSync, statSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 
 export const POLL_MS = 100;
@@ -169,6 +170,44 @@ export async function tailTranscript(
       if (signal.aborted) break;
     }
     if (entries.length > emitted) emitted = entries.length;
+    await sleep(POLL_MS);
+  }
+}
+
+export async function tailTranscriptLines(
+  transcriptPath: string,
+  onLine: (line: string, index: number) => void,
+  signal: AbortSignal
+): Promise<void> {
+  let offset = 0;
+  let buffer = "";
+  let emitted = 0;
+  while (!signal.aborted) {
+    try {
+      const size = statSync(transcriptPath).size;
+      if (size < offset) {
+        offset = 0;
+        buffer = "";
+        emitted = 0;
+      }
+      if (size > offset) {
+        const chunk = readFileSync(transcriptPath).subarray(offset, size).toString("utf8");
+        offset = size;
+        buffer += chunk;
+        const newline = buffer.lastIndexOf("\n");
+        if (newline >= 0) {
+          const complete = buffer.slice(0, newline).split("\n");
+          buffer = buffer.slice(newline + 1);
+          for (const line of complete) {
+            if (!line) continue;
+            onLine(line, emitted++);
+            if (signal.aborted) break;
+          }
+        }
+      }
+    } catch {
+      // The transcript may not exist at the exact moment the tail starts.
+    }
     await sleep(POLL_MS);
   }
 }

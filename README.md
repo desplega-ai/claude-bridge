@@ -224,13 +224,14 @@ the JSONL file.
   answer in `result`, plus available transcript metadata such as `session_id`,
   `duration_ms`, and `usage`.
 - `stream-json`: emits the native Claude session JSONL transcript lines from
-  the `transcript_path` provided by the interactive `Stop` hook. The bridge
-  flushes the completed transcript at Stop-time, including native rows such as
-  `{"type":"assistant","message":{...}}`. If the interactive transcript does
-  not include a terminal `{"type":"result",...}` row, the bridge appends one
-  in Claude-compatible result shape from the same Stop-hook assistant text and
-  hydrated transcript metadata. It does not invoke Claude Code's headless
-  `--output-format stream-json`.
+  the live interactive transcript file as Claude appends complete JSONL rows,
+  including native rows such as `{"type":"assistant","message":{...}}`. The
+  bridge learns `transcript_path` from early runtime hook events when available
+  and falls back to transcript discovery / Stop-time catch-up if needed. If the
+  interactive transcript does not include a terminal `{"type":"result",...}`
+  row, the bridge appends one in Claude-compatible result shape from the same
+  Stop-hook assistant text and hydrated transcript metadata. It does not invoke
+  Claude Code's headless `--output-format stream-json`.
 
 Use `--desplega-format` when you want the older bridge-owned JSON envelopes in
 `json` or `stream-json` modes. This flag is for bridge-specific consumers, not
@@ -257,10 +258,9 @@ Typical `--desplega-format --output-format stream-json` event types are:
 
 These custom `transcript` events only exist with `--desplega-format`. In the
 default compatibility mode, `stream-json` emits the raw session JSONL rows
-directly, one line at a time, after the `Stop` hook provides the transcript
-path, followed by a terminal Claude-compatible `result` row when the transcript
-does not already contain one. It does not emit bridge-owned `delta`/`final`
-rows.
+directly as complete lines are appended to the live transcript file, followed
+by a terminal Claude-compatible `result` row when the transcript does not
+already contain one. It does not emit bridge-owned `delta`/`final` rows.
 
 ## Structured JSON
 

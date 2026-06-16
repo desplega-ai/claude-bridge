@@ -79,12 +79,18 @@ settings = JSON.parse(readFileSync(settingsPath, "utf8")) as any;
 ok("runtime install adds Stop hook", countHooks(settings, "Stop", RUNTIME_HOOK_ARG) === 1);
 ok("runtime install adds StopFailure hook", countHooks(settings, "StopFailure", RUNTIME_HOOK_ARG) === 1);
 ok("runtime install adds MessageDisplay hook", countHooks(settings, "MessageDisplay", RUNTIME_HOOK_ARG) === 1);
+ok("runtime install adds UserPromptSubmit hook", countHooks(settings, "UserPromptSubmit", RUNTIME_HOOK_ARG) === 1);
+ok("runtime install adds SessionStart hook", countHooks(settings, "SessionStart", RUNTIME_HOOK_ARG) === 1);
+ok("runtime install adds PreToolUse hook", countHooks(settings, "PreToolUse", RUNTIME_HOOK_ARG) === 1);
 const runtimeInstalledAgain = installRuntimeHooks({ settingsPath, command: runtimeCommand });
 ok("runtime install is idempotent", !runtimeInstalledAgain.changed);
 settings = JSON.parse(readFileSync(settingsPath, "utf8")) as any;
 ok("runtime idempotent install keeps one Stop hook", countHooks(settings, "Stop", RUNTIME_HOOK_ARG) === 1);
 ok("runtime idempotent install keeps one StopFailure hook", countHooks(settings, "StopFailure", RUNTIME_HOOK_ARG) === 1);
 ok("runtime idempotent install keeps one MessageDisplay hook", countHooks(settings, "MessageDisplay", RUNTIME_HOOK_ARG) === 1);
+ok("runtime idempotent install keeps one UserPromptSubmit hook", countHooks(settings, "UserPromptSubmit", RUNTIME_HOOK_ARG) === 1);
+ok("runtime idempotent install keeps one SessionStart hook", countHooks(settings, "SessionStart", RUNTIME_HOOK_ARG) === 1);
+ok("runtime idempotent install keeps one PreToolUse hook", countHooks(settings, "PreToolUse", RUNTIME_HOOK_ARG) === 1);
 
 const staleSettingsPath = join(workdir, "stale-settings.json");
 writeFileSync(
@@ -187,6 +193,10 @@ recordRuntimeHook(
   runtimeEnv
 );
 recordRuntimeHook(
+  JSON.stringify({ hook_event_name: "UserPromptSubmit", transcript_path: "/tmp/session.jsonl" }),
+  runtimeEnv
+);
+recordRuntimeHook(
   JSON.stringify({
     hook_event_name: "Stop",
     transcript_path: "/tmp/session.jsonl",
@@ -195,6 +205,7 @@ recordRuntimeHook(
   runtimeEnv
 );
 ok("runtime hook records message display jsonl", readFileSync(join(runtimeDir, "message-display.jsonl"), "utf8").includes("hello"));
+ok("runtime hook records early transcript event", JSON.parse(readFileSync(join(runtimeDir, "transcript-event.json"), "utf8")).hook_event_name === "UserPromptSubmit");
 ok("runtime hook records stop event", JSON.parse(readFileSync(join(runtimeDir, "stop-event.json"), "utf8")).last_assistant_message === "hello");
 
 const blockedRuntimeDir = join(workdir, "runtime-blocked");

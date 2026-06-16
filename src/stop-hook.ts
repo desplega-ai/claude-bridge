@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   extractAndValidateStructuredOutput,
@@ -37,6 +37,11 @@ export function recordRuntimeHook(inputText: string, env: NodeJS.ProcessEnv = pr
   if (!input?.hook_event_name) return;
 
   mkdirSync(env.CLAUDE_BRIDGE_RUN_DIR, { recursive: true });
+  if (typeof input.transcript_path === "string" && input.transcript_path) {
+    const transcriptEventPath = join(env.CLAUDE_BRIDGE_RUN_DIR, "transcript-event.json");
+    if (!existsSync(transcriptEventPath)) writeFileSync(transcriptEventPath, inputText.trim() + "\n");
+  }
+
   if (input.hook_event_name === "Stop") {
     if (evaluateJsonSchemaStopHook(inputText, env)?.decision === "block") return;
     writeFileSync(join(env.CLAUDE_BRIDGE_RUN_DIR, "stop-event.json"), inputText.trim() + "\n");
