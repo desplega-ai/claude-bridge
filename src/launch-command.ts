@@ -47,6 +47,8 @@ export function buildClaudeLaunchCommand(opts: ClaudeLaunchCommandOptions): stri
  *
  * The prompt is read from `opts.promptFile` via stdin pipe. Claude's
  * stream-json stdout is written to `opts.stdoutFile` for the bridge to tail.
+ *
+ * INVARIANT VIOLATION — SLATED FOR REMOVAL. See startTmuxPrintMode in cli.ts.
  */
 export function buildClaudePrintLaunchCommand(opts: ClaudePrintLaunchCommandOptions): string {
   const envCommand = [

@@ -60,6 +60,34 @@ Claude's UI:
     +------------------------------------+
 ```
 
+## Billing Invariant
+
+**`claude -p`, Agent SDK, and headless `--output-format stream-json` MUST NEVER
+be used in the bridge.** This is a hard invariant, not a guideline.
+
+Claude Code distinguishes interactive (subscription-billed) from non-interactive
+(programmatic-credit-billed) usage via an `isInteractive` flag computed as:
+
+```
+isInteractive = !(hasPrint || hasInitOnly || hasSdkUrl || !stdout.isTTY)
+```
+
+Any of these triggers set `isInteractive=false`, which bills against the
+separate $200/mo programmatic credit instead of the subscription:
+
+- The `-p`/`--print` flag
+- `stdout` not being a TTY (piped or redirected)
+- The `--init-only` flag
+- The `--sdk-url` flag (Agent SDK)
+
+The bridge stays on subscription billing by spawning Claude as a real
+interactive TUI session inside a tmux pty — no `-p`, stdout is a TTY. This is
+the only path that keeps `isInteractive=true`.
+
+The current `startTmuxPrintMode` function (`src/cli.ts`) violates this invariant
+by using `claude -p` and is slated for removal in the single-turn interactive
+refactor.
+
 ## Requirements
 
 - [Bun](https://bun.sh) (`>= 1.1`)

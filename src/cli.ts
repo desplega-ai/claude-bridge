@@ -636,6 +636,20 @@ function startTmux(): void {
  * Print-mode alternative: run Claude with `-p` inside tmux and redirect
  * stdout to a file. This avoids the broken JSONL transcript dependency
  * (Claude Code >=2.1.x no longer writes per-session transcript files).
+ *
+ * INVARIANT VIOLATION — SLATED FOR REMOVAL.
+ *
+ * This function uses `claude -p`, which sets isInteractive=false in Claude
+ * Code's telemetry/metering. Non-interactive usage bills against the $200/mo
+ * programmatic credit, NOT the subscription. The same applies to Agent SDK
+ * usage and headless `--output-format stream-json` (which requires `--print`
+ * or piped stdout, both of which trigger non-interactive billing).
+ *
+ * The bridge MUST use only the real interactive TUI path (tmux pty, no `-p`,
+ * stdout as TTY) to stay on subscription billing. This function will be
+ * replaced by a single-turn interactive design in the refactor.
+ *
+ * See README.md "Billing Invariant" section for the full rationale.
  */
 function startTmuxPrintMode(claudeArgs: string[], envArgs: string[]): void {
   const promptFile = join(runDir, "prompt.txt");
