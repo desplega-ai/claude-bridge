@@ -226,9 +226,11 @@ the JSONL file.
 - `stream-json`: emits the native Claude session JSONL transcript lines from
   the `transcript_path` provided by the interactive `Stop` hook. The bridge
   flushes the completed transcript at Stop-time, including native rows such as
-  `{"type":"assistant","message":{...}}` and the terminal
-  `{"type":"result",...}` row when Claude records it. It does not invoke Claude
-  Code's headless `--output-format stream-json`.
+  `{"type":"assistant","message":{...}}`. If the interactive transcript does
+  not include a terminal `{"type":"result",...}` row, the bridge appends one
+  in Claude-compatible result shape from the same Stop-hook assistant text and
+  hydrated transcript metadata. It does not invoke Claude Code's headless
+  `--output-format stream-json`.
 
 Use `--desplega-format` when you want the older bridge-owned JSON envelopes in
 `json` or `stream-json` modes. This flag is for bridge-specific consumers, not
@@ -256,7 +258,9 @@ Typical `--desplega-format --output-format stream-json` event types are:
 These custom `transcript` events only exist with `--desplega-format`. In the
 default compatibility mode, `stream-json` emits the raw session JSONL rows
 directly, one line at a time, after the `Stop` hook provides the transcript
-path. It does not emit bridge-owned `delta`/`final` rows.
+path, followed by a terminal Claude-compatible `result` row when the transcript
+does not already contain one. It does not emit bridge-owned `delta`/`final`
+rows.
 
 ## Structured JSON
 

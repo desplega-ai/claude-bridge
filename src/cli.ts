@@ -625,7 +625,12 @@ async function waitForPrintTurnEnd(): Promise<void> {
         return;
       }
       if (outputFormat === "stream-json" && !desplegaFormat) {
-        await emitTranscriptJsonLines(stopEvent);
+        const streamResult = makeStreamJsonResultEvent(resultText);
+        if (!streamResult.ok) {
+          failPrint(streamResult.message, { rawResponse: streamResult.rawResponse });
+          return;
+        }
+        await emitTranscriptJsonLines(stopEvent, streamResult.result);
       }
       finishPrintResult(resultText);
       return;
@@ -687,7 +692,20 @@ async function hydrateTranscriptFromStopEvent(stopEvent: RuntimeStopEvent): Prom
   }
 }
 
-async function emitTranscriptJsonLines(stopEvent: RuntimeStopEvent): Promise<void> {
+function makeStreamJsonResultEvent(
+  resultText: string
+):
+  | { ok: true; result: Record<string, unknown> }
+  | { ok: false; message: string; rawResponse: string } {
+  const structured = extractStructuredOutput(resultText);
+  if (structured && !structured.ok) return structured;
+  return { ok: true, result: makeClaudeCompatResult(resultText, structured) };
+}
+
+async function emitTranscriptJsonLines(
+  stopEvent: RuntimeStopEvent,
+  resultEvent: Record<string, unknown>
+): Promise<void> {
   const transcriptPath = stopEvent.transcript_path;
   if (!transcriptPath) {
     failPrint("Claude Stop hook fired without transcript_path for stream-json output.");
@@ -707,7 +725,15 @@ async function emitTranscriptJsonLines(stopEvent: RuntimeStopEvent): Promise<voi
     return;
   }
 
+  let hasResult = false;
   for (const line of lines) process.stdout.write(line + "\n");
+  for (const line of lines) {
+    try {
+      const row = JSON.parse(line) as { type?: unknown };
+      if (row.type === "result") hasResult = true;
+    } catch {}
+  }
+  if (!hasResult) process.stdout.write(JSON.stringify(resultEvent) + "\n");
 }
 
 function emitMessageDisplayEvents(): void {
