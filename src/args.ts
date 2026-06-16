@@ -35,6 +35,20 @@ type OptionArity = "none" | "required" | "optional" | "variadic";
 
 const BLOCKED_OPTIONS = new Map<string, { label: string; reason: string }>([
   [
+    "--init-only",
+    {
+      label: "--init-only",
+      reason: "it sets Claude Code isInteractive=false and violates the bridge billing invariant.",
+    },
+  ],
+  [
+    "--sdk-url",
+    {
+      label: "--sdk-url",
+      reason: "Agent SDK mode sets Claude Code isInteractive=false and violates the bridge billing invariant.",
+    },
+  ],
+  [
     "--tmux",
     {
       label: "--tmux",

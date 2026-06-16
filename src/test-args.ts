@@ -83,6 +83,8 @@ expectBlocked(["--json-schema"], "`--json-schema` requires a value");
 expectBlocked(["say hi", "--json-schema", '{"type":"object"}'], "`--json-schema` requires `-p`");
 expectBlocked(["-p", "--json-schema", '{"type":"object"}', "--json-schema", '{"type":"array"}', "hi"], "`--json-schema` can only");
 expectBlocked(["--tmux"], "--tmux");
+expectBlocked(["--init-only"], "--init-only");
+expectBlocked(["--sdk-url", "http://127.0.0.1"], "--sdk-url");
 expectBlocked(["--replay-user-messages"], "--replay-user-messages");
 expectBlocked(["-w"], "-w, --worktree");
 expectBlocked(["-wexample"], "-w, --worktree");

@@ -23,6 +23,7 @@ import { claudeAuthEnvArgs, claudeUnsetEnvArgs } from "./auth-env.ts";
 import {
   listAllTranscriptPaths,
   projectFolderFromTranscript,
+  readTranscript,
   sessionIdFromPath,
   tailTranscript,
   waitForFreshTranscriptForCwd,
@@ -40,12 +41,14 @@ import {
 } from "./json-schema.ts";
 import {
   buildJsonSchemaStopHookCommand,
+  buildRuntimeHookCommand,
   installJsonSchemaStopHook,
+  installRuntimeHooks,
   uninstallJsonSchemaStopHook,
 } from "./hook-install.ts";
 import { makePrintErrorResult } from "./print-result.ts";
-import { runJsonSchemaStopHook } from "./stop-hook.ts";
-import { buildClaudeLaunchCommand, buildClaudePrintLaunchCommand } from "./launch-command.ts";
+import { runJsonSchemaStopHook, runRuntimeHook } from "./stop-hook.ts";
+import { buildClaudeLaunchCommand } from "./launch-command.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..");
@@ -84,6 +87,11 @@ const desplegaFormat = hasDesplegaFlag("format");
 
 if (hasDesplegaFlag("internal-json-schema-stop-hook")) {
   await runJsonSchemaStopHook();
+  process.exit(0);
+}
+
+if (hasDesplegaFlag("internal-runtime-hook")) {
+  await runRuntimeHook();
   process.exit(0);
 }
 
@@ -136,20 +144,18 @@ mkdirSync(runDir, { recursive: true });
 const jsonSchemaPath = jsonSchema ? join(runDir, "json-schema.json") : undefined;
 const claudeExitStatusPath = join(runDir, "claude-exit-status");
 const sessionName = `claude-bridge-${runId.slice(-8)}`;
-const PRINT_READY_TIMEOUT_MS = envDurationMs(
-  "CLAUDE_BRIDGE_PRINT_READY_TIMEOUT_MS",
-  envDurationMs("CLAUDE_BRIDGE_PRINT_CHANNEL_TIMEOUT_MS", 180_000)
-);
-const PRINT_REPLY_TIMEOUT_MS = envDurationMs("CLAUDE_BRIDGE_PRINT_REPLY_TIMEOUT_MS", 10 * 60_000);
 const CLAUDE_READY_TIMEOUT_MS = envDurationMs("CLAUDE_BRIDGE_CLAUDE_READY_TIMEOUT_MS", 180_000);
 const TMUX_SUBMIT_DELAY_MS = envDurationMs("CLAUDE_BRIDGE_TMUX_SUBMIT_DELAY_MS", 1_000);
 const TMUX_EXIT_HOLD_MS = envDurationMs("CLAUDE_BRIDGE_TMUX_EXIT_HOLD_MS", 30_000);
 const MAX_SESSION_MS = envDurationMs("CLAUDE_BRIDGE_MAX_SESSION_MS", 2 * 60 * 60_000);
+const stopEventPath = join(runDir, "stop-event.json");
+const messageDisplayPath = join(runDir, "message-display.jsonl");
 
 if (jsonSchemaPath && jsonSchema) {
   writeFileSync(jsonSchemaPath, jsonSchema.compact + "\n");
   installJsonSchemaStopHook({ command: buildJsonSchemaStopHookCommand() });
 }
+installRuntimeHooks({ command: buildRuntimeHookCommand() });
 
 preAcceptProject({ workdir: targetCwd, mcpServerNames: [] });
 const runningAsRoot = typeof process.getuid === "function" && process.getuid() === 0;
@@ -176,10 +182,9 @@ let lastAssistantRow: TranscriptRow | null = null;
 let lastTurnDurationMs: number | undefined;
 let pendingPrintResultText = "";
 let pendingPrintFailure: { message: string; rawResponse?: string } | null = null;
-let streamJsonResultSeen = false;
 let printDone = false;
-let printReadyTimer: ReturnType<typeof setTimeout> | null = null;
-let printReplyTimer: ReturnType<typeof setTimeout> | null = null;
+let messageDisplayOffset = 0;
+let messageDisplayIndex = 0;
 
 let rlRef: import("node:readline").Interface | null = null;
 const stdoutLine = (obj: Record<string, unknown>): void => {
@@ -348,7 +353,6 @@ function sendUserMessage(text: string): string | null {
   const sent = sendPromptToTmux(text, id);
   if (!sent) return null;
   stdoutLine({ type: "push", id, content: text, transport: "tmux" });
-  if (printMode && !printReplyTimer) startPrintReplyTimer();
   return id;
 }
 
@@ -431,7 +435,6 @@ function finishPrintResult(resultText: string): void {
   }
 
   printDone = true;
-  clearPrintTimers();
   if (outputFormat === "text") {
     const text = structured ? JSON.stringify(structured.value) : resultText;
     process.stdout.write(text.endsWith("\n") ? text : text + "\n");
@@ -486,55 +489,9 @@ function extractStructuredOutput(
   return extractAndValidateStructuredOutput(text, jsonSchema.schema);
 }
 
-function startPrintReadyTimer(): void {
-  if (!printMode || printReadyTimer) return;
-  printReadyTimer = setTimeout(() => {
-    failPrint(
-      `Timed out after ${PRINT_READY_TIMEOUT_MS / 1000}s waiting for Claude to become ready.`
-    );
-  }, PRINT_READY_TIMEOUT_MS);
-}
-
-function startPrintReplyTimer(): void {
-  if (!printMode || printReplyTimer) return;
-  printReplyTimer = setTimeout(() => {
-    failPrint(
-      `Timed out after ${PRINT_REPLY_TIMEOUT_MS / 1000}s of inactivity waiting for Claude output.`
-    );
-  }, PRINT_REPLY_TIMEOUT_MS);
-}
-
-function resetPrintReplyTimer(): void {
-  clearPrintReplyTimer();
-  if (!printMode) return;
-  printReplyTimer = setTimeout(() => {
-    failPrint(
-      `Timed out after ${PRINT_REPLY_TIMEOUT_MS / 1000}s of inactivity waiting for Claude output.`
-    );
-  }, PRINT_REPLY_TIMEOUT_MS);
-}
-
-function clearPrintReadyTimer(): void {
-  if (!printReadyTimer) return;
-  clearTimeout(printReadyTimer);
-  printReadyTimer = null;
-}
-
-function clearPrintReplyTimer(): void {
-  if (!printReplyTimer) return;
-  clearTimeout(printReplyTimer);
-  printReplyTimer = null;
-}
-
-function clearPrintTimers(): void {
-  clearPrintReadyTimer();
-  clearPrintReplyTimer();
-}
-
 function failPrint(message: string, details: { rawResponse?: string } = {}): void {
   if (printDone) return;
   printDone = true;
-  clearPrintTimers();
   const failureCapture = captureFailurePane();
   const messageWithPaneTail = appendPaneTail(message, failureCapture.paneTail);
   if (outputFormat === "text") {
@@ -574,12 +531,19 @@ function failPrint(message: string, details: { rawResponse?: string } = {}): voi
 }
 
 function startTmux(): void {
+  // BILLING INVARIANT: never pass `-p`/`--print`, Agent SDK flags, or
+  // headless `--output-format stream-json` to Claude. Claude Code computes
+  // interactive billing as `!(hasPrint || hasInitOnly || hasSdkUrl ||
+  // !stdout.isTTY)`, so the bridge must launch the real TUI in a tmux pty and
+  // synthesize print/json output itself.
   const claudeArgs = [
     ...(bypassPermissions ? ["--dangerously-skip-permissions"] : []),
     ...forwardedClaudeArgs,
   ];
   const envArgs = [
     ...claudeAuthEnvArgs(process.env, { localAuth: hasDesplegaFlag("local-auth") }),
+    "CLAUDE_BRIDGE_RUNTIME_HOOK=1",
+    `CLAUDE_BRIDGE_RUN_DIR=${runDir}`,
     ...(jsonSchemaPath
       ? [
           "CLAUDE_BRIDGE_SCHEMA_STOP_HOOK=1",
@@ -588,11 +552,6 @@ function startTmux(): void {
         ]
       : []),
   ];
-
-  if (printMode && initialMessage) {
-    startTmuxPrintMode(claudeArgs, envArgs);
-    return;
-  }
 
   const launchCommand = buildClaudeLaunchCommand({
     claudePath,
@@ -629,174 +588,115 @@ function startTmux(): void {
   void autoAcceptStartupPrompts();
   void waitForClaudeReady();
   void startTranscriptTail();
+  if (printMode) void waitForPrintTurnEnd();
   if (!printMode) printBanner();
 }
 
-/**
- * Print-mode alternative: run Claude with `-p` inside tmux and redirect
- * stdout to a file. This avoids the broken JSONL transcript dependency
- * (Claude Code >=2.1.x no longer writes per-session transcript files).
- */
-function startTmuxPrintMode(claudeArgs: string[], envArgs: string[]): void {
-  const promptFile = join(runDir, "prompt.txt");
-  const stdoutFile = join(runDir, "stdout.jsonl");
-  writeFileSync(promptFile, initialMessage!);
+type RuntimeStopEvent = {
+  hook_event_name?: string;
+  transcript_path?: string;
+  last_assistant_message?: string;
+};
 
-  const launchCommand = buildClaudePrintLaunchCommand({
-    claudePath,
-    claudeArgs,
-    unsetEnvArgs: claudeUnsetEnvArgs(),
-    envArgs,
-    exitStatusPath: claudeExitStatusPath,
-    holdMs: TMUX_EXIT_HOLD_MS,
-    promptFile,
-    stdoutFile,
-  });
-
-  desplegaDebug("starting claude in tmux (print mode)", {
-    sessionName,
-    claudePath,
-    claudeArgs,
-    bypassPermissions,
-    promptFile,
-    stdoutFile,
-  });
-
-  const newSession = [
-    "new-session",
-    "-d",
-    "-s",
-    sessionName,
-    "-x",
-    "220",
-    "-y",
-    "50",
-    "-c",
-    targetCwd,
-    launchCommand,
-  ];
-  const res = spawnSync(tmuxPath, newSession, { stdio: "inherit" });
-  if (res.status !== 0) {
-    process.stderr.write(`[claude-bridge] tmux new-session exited ${res.status}\n`);
-    process.exit(1);
-  }
-
-  void tailPrintOutput(stdoutFile);
-}
-
-async function tailPrintOutput(stdoutFile: string): Promise<void> {
+async function waitForPrintTurnEnd(): Promise<void> {
   const POLL_MS = 100;
-  const TMUX_LIVENESS_CHECK_MS = 1000;
   const startedAt = Date.now();
-  let lastTmuxCheckAt = 0;
-  let byteOffset = 0;
-
-  const processNewContent = (content: string): void => {
-    const lines = content.split("\n");
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-
-      if (outputFormat === "stream-json" && !desplegaFormat) {
-        process.stdout.write(trimmed + "\n");
-        // Detect the result row, but still wait for claude-exit-status.
-        if (trimmed.startsWith('{"type":"result"')) {
-          streamJsonResultSeen = true;
-        }
-      } else {
-        try {
-          const row = JSON.parse(trimmed) as TranscriptRow;
-          handleTranscriptRow(row, trimmed);
-        } catch {
-          // Not valid JSON — skip
-        }
-      }
-    }
-  };
-
   while (!ctrl.signal.aborted && Date.now() - startedAt < MAX_SESSION_MS) {
-    let text = "";
-    try {
-      text = readFileSync(stdoutFile, "utf8");
-    } catch {
-      // File may not exist yet — Claude hasn't started writing
-    }
+    emitMessageDisplayEvents();
 
-    if (text.length > byteOffset) {
-      if (byteOffset === 0) {
-        clearPrintReadyTimer();
-        desplegaDebug("claude output detected, ready timer cleared");
-      }
-      resetPrintReplyTimer();
-      processNewContent(text.substring(byteOffset));
-      byteOffset = text.length;
-    }
-
-    const exitStatus = readClaudeExitStatus();
-    if (exitStatus !== null) {
-      // Final flush — read any remaining bytes written between last poll and exit
-      try {
-        const finalText = readFileSync(stdoutFile, "utf8");
-        if (finalText.length > byteOffset) {
-          processNewContent(finalText.substring(byteOffset));
-        }
-      } catch {}
-
-      if (exitStatus !== "0") {
-        const stderrContent = readStderrLog(stdoutFile);
-        const msg = stderrContent
-          ? `Claude exited with status ${exitStatus}: ${stderrContent}`
-          : `Claude exited with status ${exitStatus}`;
-        failPrint(msg);
-      } else if (printDone || streamJsonResultSeen) {
-        shutdown(0);
-      } else if (pendingPrintFailure) {
+    const stopEvent = readRuntimeStopEvent();
+    if (stopEvent) {
+      emitMessageDisplayEvents();
+      await hydrateTranscriptFromStopEvent(stopEvent);
+      if (pendingPrintFailure) {
         failPrint(pendingPrintFailure.message, { rawResponse: pendingPrintFailure.rawResponse });
-      } else if (pendingPrintResultText || lastAssistantText) {
-        finishPrintResult(pendingPrintResultText || lastAssistantText);
-      } else {
-        desplegaDebug("claude exited 0 with no output — clean shutdown");
-        shutdown(0);
+        return;
       }
+      const resultText = stopEvent.last_assistant_message?.trim() || pendingPrintResultText || lastAssistantText;
+      if (!resultText) {
+        failPrint("Claude Stop hook fired without assistant text.");
+        return;
+      }
+      if (outputFormat === "stream-json" && !desplegaFormat) {
+        process.stdout.write(JSON.stringify({ delta: "", final: true, index: messageDisplayIndex++ }) + "\n");
+      }
+      finishPrintResult(resultText);
       return;
     }
 
-    const now = Date.now();
-    if (
-      !printDone &&
-      !streamJsonResultSeen &&
-      now - lastTmuxCheckAt >= TMUX_LIVENESS_CHECK_MS
-    ) {
-      lastTmuxCheckAt = now;
-      if (!tmuxSessionExists()) {
-        failPrint(
-          "tmux session/server died before Claude produced a result - likely OOM-killed or container restart."
-        );
-        return;
-      }
+    const exitStatus = readClaudeExitStatus();
+    if (exitStatus !== null && exitStatus !== "0") {
+      failPrint(`Claude exited with status ${exitStatus} before the Stop hook produced a result.`);
+      return;
     }
-
+    if (!tmuxSessionExists()) {
+      failPrint("tmux session/server died before the Stop hook produced a result.");
+      return;
+    }
     await sleep(POLL_MS);
   }
 
   if (!printDone) {
     const elapsed = Math.round((Date.now() - startedAt) / 1000);
-    const stderrContent = readStderrLog(stdoutFile);
-    const detail = stderrContent
-      ? `stderr: ${stderrContent}`
-      : "no stderr output captured";
-    failPrint(
-      `Session safety ceiling reached after ${elapsed}s (CLAUDE_BRIDGE_MAX_SESSION_MS=${MAX_SESSION_MS}). ${detail}`
-    );
+    failPrint(`Session safety ceiling reached after ${elapsed}s waiting for the Stop hook event.`);
   }
 }
 
-function readStderrLog(stdoutFile: string): string {
-  const stderrFile = stdoutFile.replace(/\.jsonl$/, ".stderr.log");
+function readRuntimeStopEvent(): RuntimeStopEvent | null {
+  if (!existsSync(stopEventPath)) return null;
   try {
-    return readFileSync(stderrFile, "utf8").trim();
+    const event = JSON.parse(readFileSync(stopEventPath, "utf8")) as RuntimeStopEvent;
+    return event.hook_event_name === "Stop" ? event : null;
   } catch {
-    return "";
+    return null;
+  }
+}
+
+async function hydrateTranscriptFromStopEvent(stopEvent: RuntimeStopEvent): Promise<void> {
+  const transcriptPath = stopEvent.transcript_path;
+  if (!transcriptPath) return;
+  transcriptSessionId = sessionIdFromPath(transcriptPath);
+  try {
+    const rows = await readTranscript(transcriptPath);
+    rows.forEach((row, index) => handleTranscriptRow(row, JSON.stringify(row)));
+    desplegaDebug("hydrated final transcript from Stop hook", {
+      transcriptPath,
+      rows: rows.length,
+    });
+  } catch (err) {
+    desplegaDebug("failed to hydrate transcript from Stop hook", {
+      transcriptPath,
+      error: (err as Error).message,
+    });
+  }
+}
+
+function emitMessageDisplayEvents(): void {
+  if (!existsSync(messageDisplayPath)) return;
+  let text = "";
+  try {
+    text = readFileSync(messageDisplayPath, "utf8");
+  } catch {
+    return;
+  }
+  if (text.length <= messageDisplayOffset) return;
+  const chunk = text.slice(messageDisplayOffset);
+  messageDisplayOffset = text.length;
+  for (const line of chunk.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let row: Record<string, unknown>;
+    try {
+      row = JSON.parse(trimmed) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const delta = typeof row.delta === "string" ? row.delta : "";
+    if (outputFormat === "stream-json" && !desplegaFormat) {
+      process.stdout.write(JSON.stringify({ delta, final: false, index: messageDisplayIndex++ }) + "\n");
+    } else {
+      stdoutLine({ type: "message_display", delta });
+    }
   }
 }
 
@@ -929,7 +829,6 @@ async function waitForClaudeReady(): Promise<void> {
     }
     if (isClaudePaneReady(pane)) {
       claudeReady = true;
-      clearPrintReadyTimer();
       desplegaDebug("claude pane ready");
       if (!flushPendingMessages()) promptIfReady();
       return;
@@ -1009,11 +908,8 @@ async function startTranscriptTail(): Promise<void> {
   );
 }
 
-function handleTranscriptRow(row: TranscriptRow, rawLine: string): void {
+function handleTranscriptRow(row: TranscriptRow, _rawLine: string): void {
   if (printMode && printDone) return;
-  if (printMode && outputFormat === "stream-json" && !desplegaFormat) {
-    process.stdout.write(rawLine.endsWith("\n") ? rawLine : rawLine + "\n");
-  }
 
   stdoutLine({ type: "transcript", row });
 
@@ -1043,15 +939,6 @@ function handleTranscriptRow(row: TranscriptRow, rawLine: string): void {
     return;
   }
 
-  // Handle `result` rows from Claude's `-p --output-format stream-json`.
-  // These appear in print-mode stdout but not in interactive transcripts.
-  if (type === "result" && !printDone) {
-    if (typeof row.duration_ms === "number") lastTurnDurationMs = row.duration_ms;
-    const resultText = typeof row.result === "string" ? row.result : lastAssistantText;
-    if (resultText) {
-      pendingPrintResultText = resultText;
-    }
-  }
 }
 
 function textFromContent(content: unknown): string {
@@ -1115,7 +1002,6 @@ let paneCaptured = false;
 function shutdown(exitCode = 0): void {
   if (shuttingDown) return;
   shuttingDown = true;
-  clearPrintTimers();
   ctrl.abort();
   if (!paneCaptured && exitCode !== 0) {
     captureFailurePane();
@@ -1125,6 +1011,5 @@ function shutdown(exitCode = 0): void {
 }
 
 desplegaDebug("run state created", { runDir });
-startPrintReadyTimer();
 startTmux();
 if (!printMode) startRepl();

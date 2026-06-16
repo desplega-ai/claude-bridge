@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   extractAndValidateStructuredOutput,
   loadJsonSchemaFromText,
@@ -14,12 +15,39 @@ type StopHookInput = {
   stop_hook_active?: boolean;
   last_assistant_message?: string;
   transcript_path?: string;
+  message?: unknown;
+  delta?: unknown;
+  [key: string]: unknown;
 };
 
 export async function runJsonSchemaStopHook(): Promise<void> {
   const input = await new Response(Bun.stdin.stream()).text();
   const decision = evaluateJsonSchemaStopHook(input, process.env);
   if (decision) process.stdout.write(JSON.stringify(decision) + "\n");
+}
+
+export async function runRuntimeHook(): Promise<void> {
+  const input = await new Response(Bun.stdin.stream()).text();
+  recordRuntimeHook(input, process.env);
+}
+
+export function recordRuntimeHook(inputText: string, env: NodeJS.ProcessEnv = process.env): void {
+  if (env.CLAUDE_BRIDGE_RUNTIME_HOOK !== "1" || !env.CLAUDE_BRIDGE_RUN_DIR) return;
+  const input = parseHookInput(inputText);
+  if (!input?.hook_event_name) return;
+
+  mkdirSync(env.CLAUDE_BRIDGE_RUN_DIR, { recursive: true });
+  if (input.hook_event_name === "Stop") {
+    writeFileSync(join(env.CLAUDE_BRIDGE_RUN_DIR, "stop-event.json"), inputText.trim() + "\n");
+    return;
+  }
+
+  if (input.hook_event_name === "MessageDisplay") {
+    appendFileSync(
+      join(env.CLAUDE_BRIDGE_RUN_DIR, "message-display.jsonl"),
+      JSON.stringify(normalizeMessageDisplay(input)) + "\n"
+    );
+  }
 }
 
 export function evaluateJsonSchemaStopHook(
@@ -63,6 +91,22 @@ function parseHookInput(inputText: string): StopHookInput | null {
   } catch {
     return null;
   }
+}
+
+function normalizeMessageDisplay(input: StopHookInput): Record<string, unknown> {
+  const delta =
+    typeof input.delta === "string"
+      ? input.delta
+      : typeof input.message === "string"
+        ? input.message
+        : typeof input.last_assistant_message === "string"
+          ? input.last_assistant_message
+          : "";
+  return {
+    type: "message_display",
+    delta,
+    raw: input,
+  };
 }
 
 function collectCandidateReplies(input: StopHookInput): string[] {

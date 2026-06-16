@@ -15,9 +15,10 @@ type BridgeResult = {
   raw_response?: string;
   structured_output?: unknown;
 };
-type TranscriptRow = Record<string, unknown> & {
-  type?: string;
-  message?: { content?: unknown };
+type DeltaRow = Record<string, unknown> & {
+  delta?: string;
+  final?: boolean;
+  index?: number;
 };
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -91,8 +92,6 @@ env.TERM = "xterm-256color";
 if (!localAuth) {
   env.CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR ?? `${process.env.HOME}/.claude`;
 }
-env.CLAUDE_BRIDGE_PRINT_READY_TIMEOUT_MS =
-  process.env.CLAUDE_BRIDGE_PRINT_READY_TIMEOUT_MS ?? "240000";
 env.CLAUDE_BRIDGE_CLAUDE_READY_TIMEOUT_MS =
   process.env.CLAUDE_BRIDGE_CLAUDE_READY_TIMEOUT_MS ?? "240000";
 env.CLAUDE_BRIDGE_TMUX_SUBMIT_DELAY_MS =
@@ -136,7 +135,7 @@ function validateSmoke(stdout: string): void {
   }
 
   if (outputFormat === "stream-json" && !desplegaFormat) {
-    validateRawTranscriptStream(stdout);
+    validateDeltaStream(stdout);
     return;
   }
 
@@ -209,45 +208,33 @@ function parseBridgeStreamResult(stdout: string): BridgeResult {
   return final;
 }
 
-function validateRawTranscriptStream(stdout: string): void {
-  const rows = parseTranscriptRows(stdout);
+function validateDeltaStream(stdout: string): void {
+  const rows = parseDeltaRows(stdout);
   const bridgeEnvelope = rows.find(row => row.type === "transcript" && "row" in row);
   if (bridgeEnvelope) {
-    throw new Error("Expected raw Claude transcript rows, got a bridge transcript envelope.");
+    throw new Error("Expected synthesized delta rows, got a bridge transcript envelope.");
   }
-  const assistantText = rows
-    .filter(row => row.type === "assistant")
-    .map(row => textFromContent(row.message?.content).trim())
-    .filter(Boolean)
-    .at(-1);
-  if (!assistantText) throw new Error("Expected an assistant transcript row in stream-json output.");
+  const final = rows.find(row => row.final === true);
+  if (!final) throw new Error("Expected a final=true row in stream-json output.");
+  const text = rows
+    .filter(row => row.final !== true)
+    .map(row => (typeof row.delta === "string" ? row.delta : ""))
+    .join("")
+    .trim();
 
   if (schema) {
-    validateStructuredOutput(JSON.parse(assistantText));
+    validateStructuredOutput(JSON.parse(text));
     return;
   }
-  if (!assistantText.toLowerCase().includes("bridge-ok")) {
-    throw new Error(`Expected assistant transcript text to include bridge-ok, got: ${JSON.stringify(assistantText)}`);
+  if (!text.toLowerCase().includes("bridge-ok")) {
+    throw new Error(`Expected stream text to include bridge-ok, got: ${JSON.stringify(text)}`);
   }
 }
 
-function parseTranscriptRows(stdout: string): TranscriptRow[] {
+function parseDeltaRows(stdout: string): DeltaRow[] {
   const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
-  if (lines.length === 0) throw new Error("Expected stream-json transcript rows, got empty stdout.");
-  return lines.map(line => JSON.parse(line) as TranscriptRow);
-}
-
-function textFromContent(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map(part => {
-      if (!part || typeof part !== "object") return "";
-      const block = part as Record<string, unknown>;
-      return block.type === "text" ? String(block.text ?? "") : "";
-    })
-    .filter(Boolean)
-    .join("\n");
+  if (lines.length === 0) throw new Error("Expected stream-json delta rows, got empty stdout.");
+  return lines.map(line => JSON.parse(line) as DeltaRow);
 }
 
 function dumpFailure(reason: string, stdout: string, stderr: string): never {

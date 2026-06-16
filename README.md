@@ -5,11 +5,13 @@ automation.
 
 Instead of delegating to raw `claude -p`, it starts normal interactive Claude
 Code inside a detached [tmux](https://github.com/tmux/tmux) pane, sends your
-prompt through tmux, tails Claude's own on-disk transcript, formats the reply,
-and exits at turn end.
+prompt through tmux, waits for Claude Code's `Stop` hook, reads the hook's
+`last_assistant_message` and `transcript_path`, formats the reply, and exits at
+turn end.
 
 That keeps prompt dispatch, transcript capture, `--output-format`, JSON schema
-validation, and process exit behavior inside the bridge.
+validation, and process exit behavior inside the bridge without ever invoking
+Claude Code's non-interactive runtime.
 
 ```sh
 # Raw Claude Code print mode
@@ -19,13 +21,11 @@ claude -p "say hi" --output-format json
 bunx @desplega.ai/claude-bridge -p "say hi" --output-format json
 ```
 
-The transcript source is the same JSONL file Claude writes under
-`~/.claude/projects/<slug>/<session-uuid>.jsonl`. Outside print mode, piped
-consumers get bridge envelopes and TTY users get a compact readable view. The
-transcript tailing follows the
-[Shannon](https://github.com/dexhorthy/shannon) technique: snapshot the
-pre-existing `*.jsonl` set before launch, poll for a fresh file, and
-poll-and-reparse it every 100 ms.
+The rich transcript source is the same JSONL file Claude writes under
+`~/.claude/projects/<slug>/<session-uuid>.jsonl`. In print mode the `Stop` hook
+hands the bridge that path together with the final assistant message. Outside
+print mode, piped consumers get bridge envelopes and TTY users get a compact
+readable view while the bridge tails the transcript for interactive display.
 
 The orchestrator also pre-clears the prompts that would otherwise block
 Claude's UI:
@@ -49,7 +49,7 @@ Claude's UI:
 +--------------------+
 | claude-bridge      |
 |  - tmux paste      |
-|  - transcript tail |
+|  - Stop hook wait  |
 +----------+---------+
            |
            | tmux paste-buffer + Enter
@@ -59,6 +59,32 @@ Claude's UI:
     |   pane 0: claude --dangerously-... |
     +------------------------------------+
 ```
+
+## Billing Invariant
+
+**`claude -p`, Agent SDK, and headless `--output-format stream-json` MUST NEVER
+be used in the bridge.** This is a hard invariant, not a guideline.
+
+Claude Code distinguishes interactive subscription-billed usage from
+non-interactive programmatic-credit-billed usage via an `isInteractive` flag
+computed as:
+
+```txt
+isInteractive = !(hasPrint || hasInitOnly || hasSdkUrl || !stdout.isTTY)
+```
+
+Any of these triggers set `isInteractive=false`, which bills against the
+separate programmatic credit instead of the subscription:
+
+- The `-p`/`--print` flag.
+- `stdout` not being a TTY, including piped or redirected headless runs.
+- The `--init-only` flag.
+- The `--sdk-url` flag used by Agent SDK mode.
+
+The bridge stays on subscription billing by spawning Claude as a real
+interactive TUI session inside a tmux pty: no `-p`, no Agent SDK, no headless
+`stream-json`, and stdout remains a TTY. Output formats are bridge-owned views
+over that one interactive path.
 
 ## Requirements
 
@@ -135,11 +161,11 @@ output. Bridge envelopes and bridge debug events are not written to stdout in
 `claude` CLI and relies on whatever authentication that `claude` process can
 use.
 
-For local interactive machines, first make sure `claude` works:
+For local interactive machines, first make sure interactive `claude` works:
 
 ```sh
 claude auth status
-claude -p "say hi"
+claude
 ```
 
 Then run the bridge:
@@ -187,17 +213,20 @@ requires print mode and accepts `text`, `json`, or `stream-json`; the default is
 Compatibility mode is the default. If you are replacing `claude -p` in scripts,
 do not pass `--desplega-format`.
 
-The final result comes from the transcript. When Claude writes a `system`
-`turn_duration` row, the wrapper uses the latest assistant text it saw in that
-turn.
+The final result comes from Claude Code's interactive `Stop` hook. The hook
+provides both `last_assistant_message` and `transcript_path`; the bridge uses
+the assistant message as the fast path and hydrates transcript metadata from
+the JSONL file.
 
 - `text`: prints only the final answer text plus a trailing newline. Wrapper
   errors go to stderr and exit non-zero.
 - `json`: prints one final Claude-compatible JSON result object with the
   answer in `result`, plus available transcript metadata such as `session_id`,
   `duration_ms`, and `usage`.
-- `stream-json`: streams raw Claude transcript JSONL rows as they are written.
-  The bridge does not wrap them in custom envelopes.
+- `stream-json`: streams bridge-synthesized JSONL delta rows from Claude
+  Code's interactive `MessageDisplay` hook, then a final row when the `Stop`
+  hook fires. It does not invoke Claude Code's headless `--output-format
+  stream-json`.
 
 Use `--desplega-format` when you want the older bridge-owned JSON envelopes in
 `json` or `stream-json` modes. This flag is for bridge-specific consumers, not
@@ -210,7 +239,7 @@ claude-bridge -p "say hi" --output-format stream-json --desplega-format
 With `--desplega-format`, `json` includes bridge debug metadata when
 `--desplega-verbose` is set, and `stream-json` prints newline-delimited bridge
 events as the run progresses, then a final `result` event. This is a custom
-`claude-bridge` event stream, not Claude's native `stream-json` schema.
+`claude-bridge` event stream, not Claude's native headless `stream-json` schema.
 
 Typical `--desplega-format --output-format stream-json` event types are:
 
@@ -223,15 +252,16 @@ Typical `--desplega-format --output-format stream-json` event types are:
 ```
 
 These custom `transcript` events only exist with `--desplega-format`. In the
-default compatibility mode, the same Claude data is written as the top-level
-JSONL row.
+default compatibility mode, `stream-json` emits compact delta rows shaped like
+`{"delta":"...","final":false,"index":0}` and a final row shaped like
+`{"delta":"","final":true,"index":1}`.
 
 ## Structured JSON
 
 `--json-schema <schema|file>` is bridge-owned. It is not forwarded to raw
-`claude -p`; the wrapper keeps the normal tmux/transcript path, injects schema
-guidance with `--append-system-prompt`, extracts the last JSON value from the
-final assistant text, and validates it locally with Zod.
+`claude -p`; the wrapper keeps the normal interactive tmux path, injects
+schema guidance with `--append-system-prompt`, extracts the last JSON value
+from the final assistant text, and validates it locally with Zod.
 
 Existing user-provided `--append-system-prompt` values are preserved. When a
 schema is present, the wrapper merges those prompts with its schema instruction
@@ -318,8 +348,9 @@ the same tmux/transcript bridge.
 
 Claude subcommands are intentionally blocked; run `claude <cmd>` directly for
 commands such as `doctor`, `mcp`, `plugin`, `update`, `agents`, or `auth`.
-Claude modes that conflict with the bridge are also blocked: `--tmux`,
-`--replay-user-messages`/`--replay*`, and `-w`/`--worktree`.
+Claude modes that conflict with the bridge or the billing invariant are also
+blocked: `--tmux`, `--replay-user-messages`/`--replay*`, `-w`/`--worktree`,
+`--init-only`, and `--sdk-url`.
 
 Use `--claude-help` to see raw Claude help, with the caveat that wrapper-owned
 modes behave as described here. Use `-v`/`--version` to print the wrapper
@@ -522,7 +553,7 @@ to localhost binding unless explicitly exposed.
 
 ## Layout
 
-- `src/cli.ts` — orchestrator (tmux launcher + stdin REPL + transcript tail).
+- `src/cli.ts` — orchestrator (tmux launcher + stdin REPL + hook/transcript result handling).
 - `src/auth-env.ts` — auth environment forwarding and local-auth handling.
 - `src/mcp-channel.ts` — optional channel MCP kept for hermetic protocol tests
   and future transport experiments.
@@ -531,7 +562,7 @@ to localhost binding unless explicitly exposed.
 - `src/preaccept.ts` — pre-writes Claude's global trust entry +
   `.claude/settings.local.json` to suppress trust and permission prompts.
 - `src/hook-install.ts` and `src/stop-hook.ts` — install and execute the
-  schema-only global Stop hook.
+  runtime Stop/MessageDisplay hooks and the schema validation Stop hook.
 - Each run writes its run state and schema copy under
   `.claude-bridge/runs/<id>/` in the target cwd.
 
