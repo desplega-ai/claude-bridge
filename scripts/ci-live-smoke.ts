@@ -15,11 +15,7 @@ type BridgeResult = {
   raw_response?: string;
   structured_output?: unknown;
 };
-type DeltaRow = Record<string, unknown> & {
-  delta?: string;
-  final?: boolean;
-  index?: number;
-};
+type TranscriptRow = Record<string, unknown> & { type?: string };
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..");
@@ -135,7 +131,7 @@ function validateSmoke(stdout: string): void {
   }
 
   if (outputFormat === "stream-json" && !desplegaFormat) {
-    validateDeltaStream(stdout);
+    validateNativeTranscriptStream(stdout);
     return;
   }
 
@@ -208,19 +204,17 @@ function parseBridgeStreamResult(stdout: string): BridgeResult {
   return final;
 }
 
-function validateDeltaStream(stdout: string): void {
-  const rows = parseDeltaRows(stdout);
-  const bridgeEnvelope = rows.find(row => row.type === "transcript" && "row" in row);
-  if (bridgeEnvelope) {
-    throw new Error("Expected synthesized delta rows, got a bridge transcript envelope.");
+function validateNativeTranscriptStream(stdout: string): void {
+  const rows = parseTranscriptRows(stdout);
+  const syntheticDelta = rows.find(row => "delta" in row || "final" in row || "index" in row);
+  if (syntheticDelta) {
+    throw new Error(`Expected native Claude transcript JSONL, got synthesized delta row: ${JSON.stringify(syntheticDelta)}`);
   }
-  const final = rows.find(row => row.final === true);
-  if (!final) throw new Error("Expected a final=true row in stream-json output.");
-  const text = rows
-    .filter(row => row.final !== true)
-    .map(row => (typeof row.delta === "string" ? row.delta : ""))
-    .join("")
-    .trim();
+  const assistant = rows.find(row => row.type === "assistant");
+  if (!assistant) throw new Error("Expected a native assistant transcript row in stream-json output.");
+  const result = rows.find(row => row.type === "result");
+  if (!result) throw new Error("Expected a native terminal result transcript row in stream-json output.");
+  const text = assistantText(assistant).trim();
 
   if (schema) {
     validateStructuredOutput(JSON.parse(text));
@@ -231,10 +225,24 @@ function validateDeltaStream(stdout: string): void {
   }
 }
 
-function parseDeltaRows(stdout: string): DeltaRow[] {
+function parseTranscriptRows(stdout: string): TranscriptRow[] {
   const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
-  if (lines.length === 0) throw new Error("Expected stream-json delta rows, got empty stdout.");
-  return lines.map(line => JSON.parse(line) as DeltaRow);
+  if (lines.length === 0) throw new Error("Expected native stream-json transcript rows, got empty stdout.");
+  return lines.map(line => JSON.parse(line) as TranscriptRow);
+}
+
+function assistantText(row: TranscriptRow): string {
+  const message = row.message as { content?: unknown } | undefined;
+  const content = message?.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map(part => {
+      if (!part || typeof part !== "object") return "";
+      const candidate = part as { text?: unknown };
+      return typeof candidate.text === "string" ? candidate.text : "";
+    })
+    .join("");
 }
 
 function dumpFailure(reason: string, stdout: string, stderr: string): never {

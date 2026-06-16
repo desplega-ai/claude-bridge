@@ -135,6 +135,10 @@ export async function readTranscript(transcriptPath: string): Promise<Transcript
   return (await readTranscriptEntries(transcriptPath)).map(entry => entry.row);
 }
 
+export async function readTranscriptLines(transcriptPath: string): Promise<string[]> {
+  return (await readTranscriptEntries(transcriptPath)).map(entry => entry.line);
+}
+
 async function readTranscriptEntries(transcriptPath: string): Promise<TranscriptEntry[]> {
   const file = Bun.file(transcriptPath);
   if (!(await file.exists())) return [];

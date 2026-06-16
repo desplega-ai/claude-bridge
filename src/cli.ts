@@ -24,6 +24,7 @@ import {
   listAllTranscriptPaths,
   projectFolderFromTranscript,
   readTranscript,
+  readTranscriptLines,
   sessionIdFromPath,
   tailTranscript,
   waitForFreshTranscriptForCwd,
@@ -184,7 +185,6 @@ let pendingPrintResultText = "";
 let pendingPrintFailure: { message: string; rawResponse?: string } | null = null;
 let printDone = false;
 let messageDisplayOffset = 0;
-let messageDisplayIndex = 0;
 
 let rlRef: import("node:readline").Interface | null = null;
 const stdoutLine = (obj: Record<string, unknown>): void => {
@@ -596,6 +596,9 @@ type RuntimeStopEvent = {
   hook_event_name?: string;
   transcript_path?: string;
   last_assistant_message?: string;
+  message?: unknown;
+  reason?: unknown;
+  error?: unknown;
 };
 
 async function waitForPrintTurnEnd(): Promise<void> {
@@ -608,6 +611,10 @@ async function waitForPrintTurnEnd(): Promise<void> {
     if (stopEvent) {
       emitMessageDisplayEvents();
       await hydrateTranscriptFromStopEvent(stopEvent);
+      if (stopEvent.hook_event_name === "StopFailure") {
+        failPrint(runtimeStopFailureMessage(stopEvent), { rawResponse: JSON.stringify(stopEvent) });
+        return;
+      }
       if (pendingPrintFailure) {
         failPrint(pendingPrintFailure.message, { rawResponse: pendingPrintFailure.rawResponse });
         return;
@@ -618,7 +625,7 @@ async function waitForPrintTurnEnd(): Promise<void> {
         return;
       }
       if (outputFormat === "stream-json" && !desplegaFormat) {
-        process.stdout.write(JSON.stringify({ delta: "", final: true, index: messageDisplayIndex++ }) + "\n");
+        await emitTranscriptJsonLines(stopEvent);
       }
       finishPrintResult(resultText);
       return;
@@ -646,10 +653,19 @@ function readRuntimeStopEvent(): RuntimeStopEvent | null {
   if (!existsSync(stopEventPath)) return null;
   try {
     const event = JSON.parse(readFileSync(stopEventPath, "utf8")) as RuntimeStopEvent;
-    return event.hook_event_name === "Stop" ? event : null;
+    return event.hook_event_name === "Stop" || event.hook_event_name === "StopFailure" ? event : null;
   } catch {
     return null;
   }
+}
+
+function runtimeStopFailureMessage(stopEvent: RuntimeStopEvent): string {
+  for (const field of [stopEvent.error, stopEvent.reason, stopEvent.message]) {
+    if (typeof field === "string" && field.trim()) {
+      return `Claude StopFailure hook fired: ${field.trim()}`;
+    }
+  }
+  return "Claude StopFailure hook fired before the Stop hook produced a result.";
 }
 
 async function hydrateTranscriptFromStopEvent(stopEvent: RuntimeStopEvent): Promise<void> {
@@ -669,6 +685,29 @@ async function hydrateTranscriptFromStopEvent(stopEvent: RuntimeStopEvent): Prom
       error: (err as Error).message,
     });
   }
+}
+
+async function emitTranscriptJsonLines(stopEvent: RuntimeStopEvent): Promise<void> {
+  const transcriptPath = stopEvent.transcript_path;
+  if (!transcriptPath) {
+    failPrint("Claude Stop hook fired without transcript_path for stream-json output.");
+    return;
+  }
+
+  let lines: string[];
+  try {
+    lines = await readTranscriptLines(transcriptPath);
+  } catch (err) {
+    failPrint(`Failed to read Claude transcript for stream-json output: ${(err as Error).message}`);
+    return;
+  }
+
+  if (lines.length === 0) {
+    failPrint(`Claude transcript was empty for stream-json output: ${transcriptPath}`);
+    return;
+  }
+
+  for (const line of lines) process.stdout.write(line + "\n");
 }
 
 function emitMessageDisplayEvents(): void {
@@ -693,7 +732,7 @@ function emitMessageDisplayEvents(): void {
     }
     const delta = typeof row.delta === "string" ? row.delta : "";
     if (outputFormat === "stream-json" && !desplegaFormat) {
-      process.stdout.write(JSON.stringify({ delta, final: false, index: messageDisplayIndex++ }) + "\n");
+      continue;
     } else {
       stdoutLine({ type: "message_display", delta });
     }

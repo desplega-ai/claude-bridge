@@ -77,11 +77,13 @@ const runtimeInstalled = installRuntimeHooks({ settingsPath, command: runtimeCom
 ok("runtime install reports changed first time", runtimeInstalled.changed);
 settings = JSON.parse(readFileSync(settingsPath, "utf8")) as any;
 ok("runtime install adds Stop hook", countHooks(settings, "Stop", RUNTIME_HOOK_ARG) === 1);
+ok("runtime install adds StopFailure hook", countHooks(settings, "StopFailure", RUNTIME_HOOK_ARG) === 1);
 ok("runtime install adds MessageDisplay hook", countHooks(settings, "MessageDisplay", RUNTIME_HOOK_ARG) === 1);
 const runtimeInstalledAgain = installRuntimeHooks({ settingsPath, command: runtimeCommand });
 ok("runtime install is idempotent", !runtimeInstalledAgain.changed);
 settings = JSON.parse(readFileSync(settingsPath, "utf8")) as any;
 ok("runtime idempotent install keeps one Stop hook", countHooks(settings, "Stop", RUNTIME_HOOK_ARG) === 1);
+ok("runtime idempotent install keeps one StopFailure hook", countHooks(settings, "StopFailure", RUNTIME_HOOK_ARG) === 1);
 ok("runtime idempotent install keeps one MessageDisplay hook", countHooks(settings, "MessageDisplay", RUNTIME_HOOK_ARG) === 1);
 
 const staleSettingsPath = join(workdir, "stale-settings.json");
@@ -194,6 +196,32 @@ recordRuntimeHook(
 );
 ok("runtime hook records message display jsonl", readFileSync(join(runtimeDir, "message-display.jsonl"), "utf8").includes("hello"));
 ok("runtime hook records stop event", JSON.parse(readFileSync(join(runtimeDir, "stop-event.json"), "utf8")).last_assistant_message === "hello");
+
+const blockedRuntimeDir = join(workdir, "runtime-blocked");
+recordRuntimeHook(
+  stopInput(invalidTranscript),
+  {
+    ...runtimeEnv,
+    CLAUDE_BRIDGE_RUN_DIR: blockedRuntimeDir,
+    CLAUDE_BRIDGE_SCHEMA_STOP_HOOK: "1",
+    CLAUDE_BRIDGE_JSON_SCHEMA_PATH: schemaPath,
+  }
+);
+let blockedStopRecorded = true;
+try {
+  readFileSync(join(blockedRuntimeDir, "stop-event.json"), "utf8");
+} catch {
+  blockedStopRecorded = false;
+}
+ok("runtime hook ignores schema-blocked Stop events", !blockedStopRecorded);
+
+const failureRuntimeDir = join(workdir, "runtime-failure");
+recordRuntimeHook(
+  JSON.stringify({ hook_event_name: "StopFailure", message: "rate limited" }),
+  { ...runtimeEnv, CLAUDE_BRIDGE_RUN_DIR: failureRuntimeDir }
+);
+const failureEvent = JSON.parse(readFileSync(join(failureRuntimeDir, "stop-event.json"), "utf8")) as any;
+ok("runtime hook records StopFailure event", failureEvent.hook_event_name === "StopFailure");
 
 try { rmSync(workdir, { recursive: true, force: true }); } catch {}
 

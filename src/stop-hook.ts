@@ -38,6 +38,12 @@ export function recordRuntimeHook(inputText: string, env: NodeJS.ProcessEnv = pr
 
   mkdirSync(env.CLAUDE_BRIDGE_RUN_DIR, { recursive: true });
   if (input.hook_event_name === "Stop") {
+    if (evaluateJsonSchemaStopHook(inputText, env)?.decision === "block") return;
+    writeFileSync(join(env.CLAUDE_BRIDGE_RUN_DIR, "stop-event.json"), inputText.trim() + "\n");
+    return;
+  }
+
+  if (input.hook_event_name === "StopFailure") {
     writeFileSync(join(env.CLAUDE_BRIDGE_RUN_DIR, "stop-event.json"), inputText.trim() + "\n");
     return;
   }

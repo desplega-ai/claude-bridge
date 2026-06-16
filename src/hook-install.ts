@@ -51,6 +51,11 @@ export function installRuntimeHooks(opts: {
 
   const before = JSON.stringify(settings.hooks);
   settings.hooks.Stop = upsertBridgeHook(settings.hooks.Stop ?? [], opts.command, RUNTIME_HOOK_ARG);
+  settings.hooks.StopFailure = upsertBridgeHook(
+    settings.hooks.StopFailure ?? [],
+    opts.command,
+    RUNTIME_HOOK_ARG
+  );
   settings.hooks.MessageDisplay = upsertBridgeHook(
     settings.hooks.MessageDisplay ?? [],
     opts.command,

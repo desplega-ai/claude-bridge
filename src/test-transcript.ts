@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import {
   listAllTranscriptPaths,
   listTranscriptPaths,
+  readTranscriptLines,
   waitForFreshTranscript,
   waitForFreshTranscriptForCwd,
   tailTranscript,
@@ -108,6 +109,9 @@ ok("turn_duration row last", seen[3]?.type === "system" && (seen[3] as any).subt
 // no duplicates
 const userCount = seen.filter(r => r.type === "user").length;
 ok("user row appears exactly once", userCount === 1);
+
+const rawLines = await readTranscriptLines(transcriptPath);
+ok("readTranscriptLines preserves raw JSONL lines", rawLines[2]?.includes("\"assistant\"") === true);
 
 try { rmSync(projectFolder, { recursive: true, force: true }); } catch {}
 try { rmSync(existingProjectFolder, { recursive: true, force: true }); } catch {}
