@@ -5,7 +5,7 @@
  * waitForFreshTranscript finds it and tailTranscript emits every row exactly
  * once even when new rows append after the tail starts.
  */
-import { mkdirSync, writeFileSync, appendFileSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, appendFileSync, rmSync, readFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -13,6 +13,7 @@ import {
   isTurnDurationRow,
   listAllTranscriptPaths,
   listTranscriptPaths,
+  readTranscript,
   readTranscriptLines,
   transcriptHasTurnEnd,
   waitForFreshTranscript,
@@ -117,6 +118,23 @@ ok("user row appears exactly once", userCount === 1);
 const rawLines = await readTranscriptLines(transcriptPath);
 ok("readTranscriptLines preserves raw JSONL lines", rawLines[2]?.includes("\"assistant\"") === true);
 
+const offsetPath = join(projectFolder, "offset.jsonl");
+const oldRows = [
+  { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "old" }] } },
+  { type: "system", subtype: "turn_duration", durationMs: 1 },
+];
+writeFileSync(offsetPath, oldRows.map(row => JSON.stringify(row)).join("\n") + "\n");
+const offsetStart = Buffer.byteLength(readFileSync(offsetPath, "utf8"));
+appendFileSync(
+  offsetPath,
+  JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "new" }] } }) + "\n"
+);
+const offsetRows = await readTranscript(offsetPath, offsetStart);
+ok("readTranscript can start from byte offset", offsetRows.length === 1 && offsetRows[0]?.type === "assistant");
+ok("transcriptHasTurnEnd ignores rows before offset", (await transcriptHasTurnEnd(offsetPath, offsetStart)) === false);
+appendFileSync(offsetPath, JSON.stringify({ type: "system", subtype: "turn_duration", durationMs: 2 }) + "\n");
+ok("transcriptHasTurnEnd sees turn end after offset", (await transcriptHasTurnEnd(offsetPath, offsetStart)) === true);
+
 const partialPath = join(projectFolder, "partial.jsonl");
 writeFileSync(partialPath, "");
 const partialCtrl = new AbortController();
@@ -131,6 +149,30 @@ partialCtrl.abort();
 await partialTail;
 ok("tailTranscriptLines emits completed partial after newline", partialLines[0]?.includes("\"partial\"") === true);
 ok("tailTranscriptLines emits later complete line", partialLines[1]?.includes("\"assistant\"") === true);
+
+const offsetTailPath = join(projectFolder, "offset-tail.jsonl");
+writeFileSync(
+  offsetTailPath,
+  JSON.stringify({ type: "assistant", message: "old" }) + "\n"
+);
+const tailOffset = Buffer.byteLength(readFileSync(offsetTailPath, "utf8"));
+const offsetTailCtrl = new AbortController();
+const offsetTailLines: string[] = [];
+const offsetTail = tailTranscriptLines(
+  offsetTailPath,
+  line => offsetTailLines.push(line),
+  offsetTailCtrl.signal,
+  tailOffset
+);
+await new Promise(r => setTimeout(r, 150));
+appendFileSync(offsetTailPath, JSON.stringify({ type: "assistant", message: "new" }) + "\n");
+await new Promise(r => setTimeout(r, 250));
+offsetTailCtrl.abort();
+await offsetTail;
+ok(
+  "tailTranscriptLines starts at byte offset",
+  offsetTailLines.length === 1 && offsetTailLines[0]?.includes("\"new\"") === true
+);
 
 const utf8Path = join(projectFolder, "utf8.jsonl");
 writeFileSync(utf8Path, "");

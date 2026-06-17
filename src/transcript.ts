@@ -133,18 +133,30 @@ export async function waitForFreshTranscriptForCwd(
 export type TranscriptRow = Record<string, unknown> & { type?: string };
 type TranscriptEntry = { row: TranscriptRow; line: string };
 
-export async function readTranscript(transcriptPath: string): Promise<TranscriptRow[]> {
-  return (await readTranscriptEntries(transcriptPath)).map(entry => entry.row);
+export async function readTranscript(
+  transcriptPath: string,
+  startByteOffset = 0
+): Promise<TranscriptRow[]> {
+  return (await readTranscriptEntries(transcriptPath, startByteOffset)).map(entry => entry.row);
 }
 
-export async function readTranscriptLines(transcriptPath: string): Promise<string[]> {
-  return (await readTranscriptEntries(transcriptPath)).map(entry => entry.line);
+export async function readTranscriptLines(
+  transcriptPath: string,
+  startByteOffset = 0
+): Promise<string[]> {
+  return (await readTranscriptEntries(transcriptPath, startByteOffset)).map(entry => entry.line);
 }
 
-async function readTranscriptEntries(transcriptPath: string): Promise<TranscriptEntry[]> {
+async function readTranscriptEntries(
+  transcriptPath: string,
+  startByteOffset = 0
+): Promise<TranscriptEntry[]> {
   const file = Bun.file(transcriptPath);
   if (!(await file.exists())) return [];
-  const text = await file.text();
+  const text =
+    startByteOffset > 0
+      ? new StringDecoder("utf8").write(readFileSync(transcriptPath).subarray(startByteOffset))
+      : await file.text();
   return text
     .split("\n")
     .filter(Boolean)
@@ -178,9 +190,10 @@ export async function tailTranscript(
 export async function tailTranscriptLines(
   transcriptPath: string,
   onLine: (line: string, index: number) => void,
-  signal: AbortSignal
+  signal: AbortSignal,
+  startByteOffset = 0
 ): Promise<void> {
-  let offset = 0;
+  let offset = startByteOffset;
   let buffer = "";
   let emitted = 0;
   let decoder = new StringDecoder("utf8");
@@ -224,8 +237,11 @@ export function isTurnDurationRow(row: TranscriptRow): boolean {
   return row.type === "system" && (row as { subtype?: unknown }).subtype === "turn_duration";
 }
 
-export async function transcriptHasTurnEnd(transcriptPath: string): Promise<boolean> {
-  return (await readTranscript(transcriptPath)).some(isTurnDurationRow);
+export async function transcriptHasTurnEnd(
+  transcriptPath: string,
+  startByteOffset = 0
+): Promise<boolean> {
+  return (await readTranscript(transcriptPath, startByteOffset)).some(isTurnDurationRow);
 }
 
 /**
@@ -237,11 +253,12 @@ export async function transcriptHasTurnEnd(transcriptPath: string): Promise<bool
 export async function waitForTranscriptTurnEnd(
   transcriptPath: string,
   timeoutMs: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  startByteOffset = 0
 ): Promise<boolean> {
   const startedAt = Date.now();
   while (!signal?.aborted && Date.now() - startedAt < timeoutMs) {
-    if (await transcriptHasTurnEnd(transcriptPath)) return true;
+    if (await transcriptHasTurnEnd(transcriptPath, startByteOffset)) return true;
     await sleep(POLL_MS);
   }
   return false;

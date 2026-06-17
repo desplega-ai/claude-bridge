@@ -207,6 +207,8 @@ let messageDisplayOffset = 0;
 // events (dropping interactive-only rows), then a terminal result event.
 let claudeInitEmitted = false;
 let claudeStreamEmittedCount = 0;
+let claudeStreamTranscriptPath: string | undefined;
+let claudeStreamTranscriptStartOffset = 0;
 let claudeVersionFromTranscript: string | undefined;
 let transcriptProjectFolder: string | undefined;
 let lastApiErrorStatus: number | null = null;
@@ -651,10 +653,12 @@ async function waitForPrintTurnEnd(): Promise<void> {
       // terminal turn_duration rows. Wait for that turn-end row to land so the
       // streamed transcript (and the synthesized result) isn't truncated.
       if (stopEvent.hook_event_name === "Stop" && stopEvent.transcript_path) {
+        const startOffset = claudeStreamOffsetFor(stopEvent.transcript_path);
         await waitForTranscriptTurnEnd(
           stopEvent.transcript_path,
           TURN_END_FLUSH_TIMEOUT_MS,
-          ctrl.signal
+          ctrl.signal,
+          startOffset
         );
         emitMessageDisplayEvents();
       }
@@ -802,7 +806,11 @@ async function emitClaudeStreamResult(stopEvent: RuntimeStopEvent, resultText: s
   }
   if (stopEvent.transcript_path) {
     try {
-      emitClaudeStreamCatchUp(await readTranscript(stopEvent.transcript_path));
+      const startOffset = claudeStreamOffsetFor(stopEvent.transcript_path);
+      emitClaudeStreamCatchUp(await readTranscript(
+        stopEvent.transcript_path,
+        startOffset
+      ));
     } catch (err) {
       desplegaDebug("failed to drain transcript for stream-json result", {
         error: (err as Error).message,
@@ -1041,9 +1049,13 @@ async function startTranscriptTail(): Promise<void> {
   const compatStreamJsonPrint = printMode && outputFormat === "stream-json" && !desplegaFormat;
   let transcriptPath: string;
   try {
-    transcriptPath =
-      (compatStreamJsonPrint ? await waitForRuntimeTranscriptPath(1_500) : null) ??
+    const runtimeTranscriptPath = compatStreamJsonPrint
+      ? await waitForRuntimeTranscriptPath(1_500)
+      : null;
+    transcriptPath = runtimeTranscriptPath ??
       await waitForFreshTranscriptForCwd(targetCwd, transcriptsBefore, ctrl.signal);
+    claudeStreamTranscriptPath = transcriptPath;
+    claudeStreamTranscriptStartOffset = runtimeTranscriptPath ? transcriptSize(transcriptPath) : 0;
   } catch (err) {
     if (printMode) {
       desplegaDebug("live transcript discovery failed; falling back to Stop hook result", {
@@ -1077,7 +1089,8 @@ async function startTranscriptTail(): Promise<void> {
         handleTranscriptRow(row, line);
         emitClaudeStreamRow(row);
       },
-      ctrl.signal
+      ctrl.signal,
+      claudeStreamTranscriptStartOffset
     );
     return;
   }
@@ -1086,6 +1099,18 @@ async function startTranscriptTail(): Promise<void> {
     (row: TranscriptRow, _index: number, rawLine: string) => handleTranscriptRow(row, rawLine),
     ctrl.signal
   );
+}
+
+function claudeStreamOffsetFor(transcriptPath: string): number {
+  return transcriptPath === claudeStreamTranscriptPath ? claudeStreamTranscriptStartOffset : 0;
+}
+
+function transcriptSize(transcriptPath: string): number {
+  try {
+    return statSync(transcriptPath).size;
+  } catch {
+    return 0;
+  }
 }
 
 async function waitForRuntimeTranscriptPath(timeoutMs: number): Promise<string | null> {
