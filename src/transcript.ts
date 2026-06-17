@@ -13,6 +13,7 @@ import { join, basename, dirname, resolve } from "node:path";
 import { homedir } from "node:os";
 import { readFileSync, statSync } from "node:fs";
 import { readdir } from "node:fs/promises";
+import { StringDecoder } from "node:string_decoder";
 
 export const POLL_MS = 100;
 // Generous because Claude may show first-run screens before writing the
@@ -182,6 +183,7 @@ export async function tailTranscriptLines(
   let offset = 0;
   let buffer = "";
   let emitted = 0;
+  let decoder = new StringDecoder("utf8");
   while (!signal.aborted) {
     try {
       const size = statSync(transcriptPath).size;
@@ -189,9 +191,10 @@ export async function tailTranscriptLines(
         offset = 0;
         buffer = "";
         emitted = 0;
+        decoder = new StringDecoder("utf8");
       }
       if (size > offset) {
-        const chunk = readFileSync(transcriptPath).subarray(offset, size).toString("utf8");
+        const chunk = decoder.write(readFileSync(transcriptPath).subarray(offset, size));
         offset = size;
         buffer += chunk;
         const newline = buffer.lastIndexOf("\n");

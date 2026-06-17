@@ -667,8 +667,12 @@ async function waitForPrintTurnEnd(): Promise<void> {
         failPrint(pendingPrintFailure.message, { rawResponse: pendingPrintFailure.rawResponse });
         return;
       }
-      const resultText = stopEvent.last_assistant_message?.trim() || pendingPrintResultText || lastAssistantText;
-      if (!resultText) {
+      const stopAssistantText =
+        typeof stopEvent.last_assistant_message === "string" && stopEvent.last_assistant_message !== ""
+          ? stopEvent.last_assistant_message
+          : undefined;
+      const resultText = stopAssistantText ?? pendingPrintResultText ?? lastAssistantText;
+      if (resultText === undefined || resultText === "") {
         failPrint("Claude Stop hook fired without assistant text.");
         return;
       }
@@ -1041,14 +1045,10 @@ async function startTranscriptTail(): Promise<void> {
       (compatStreamJsonPrint ? await waitForRuntimeTranscriptPath(1_500) : null) ??
       await waitForFreshTranscriptForCwd(targetCwd, transcriptsBefore, ctrl.signal);
   } catch (err) {
-    if (compatStreamJsonPrint) {
-      desplegaDebug("live stream-json transcript discovery failed; falling back to Stop-time transcript flush", {
+    if (printMode) {
+      desplegaDebug("live transcript discovery failed; falling back to Stop hook result", {
         error: (err as Error).message,
       });
-      return;
-    }
-    if (printMode) {
-      failPrint((err as Error).message);
       return;
     }
     stdoutLine({

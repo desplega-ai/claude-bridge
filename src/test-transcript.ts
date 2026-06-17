@@ -132,6 +132,22 @@ await partialTail;
 ok("tailTranscriptLines emits completed partial after newline", partialLines[0]?.includes("\"partial\"") === true);
 ok("tailTranscriptLines emits later complete line", partialLines[1]?.includes("\"assistant\"") === true);
 
+const utf8Path = join(projectFolder, "utf8.jsonl");
+writeFileSync(utf8Path, "");
+const utf8Ctrl = new AbortController();
+const utf8Lines: string[] = [];
+const utf8Tail = tailTranscriptLines(utf8Path, line => utf8Lines.push(line), utf8Ctrl.signal);
+const utf8Line = Buffer.from(JSON.stringify({ type: "assistant", message: "hello 😀" }) + "\n");
+const emojiOffset = utf8Line.indexOf(Buffer.from("😀"));
+appendFileSync(utf8Path, utf8Line.subarray(0, emojiOffset + 2));
+await new Promise(r => setTimeout(r, 250));
+ok("tailTranscriptLines buffers split UTF-8 character before newline", utf8Lines.length === 0);
+appendFileSync(utf8Path, utf8Line.subarray(emojiOffset + 2));
+await new Promise(r => setTimeout(r, 250));
+utf8Ctrl.abort();
+await utf8Tail;
+ok("tailTranscriptLines preserves split UTF-8 character", utf8Lines[0] === utf8Line.toString("utf8").trimEnd());
+
 // isTurnDurationRow recognizes only the terminal turn_duration system row.
 ok(
   "isTurnDurationRow matches turn_duration",
