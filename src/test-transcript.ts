@@ -10,11 +10,14 @@ import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
+  isTurnDurationRow,
   listAllTranscriptPaths,
   listTranscriptPaths,
   readTranscriptLines,
+  transcriptHasTurnEnd,
   waitForFreshTranscript,
   waitForFreshTranscriptForCwd,
+  waitForTranscriptTurnEnd,
   tailTranscript,
   tailTranscriptLines,
   sessionIdFromPath,
@@ -128,6 +131,44 @@ partialCtrl.abort();
 await partialTail;
 ok("tailTranscriptLines emits completed partial after newline", partialLines[0]?.includes("\"partial\"") === true);
 ok("tailTranscriptLines emits later complete line", partialLines[1]?.includes("\"assistant\"") === true);
+
+// isTurnDurationRow recognizes only the terminal turn_duration system row.
+ok(
+  "isTurnDurationRow matches turn_duration",
+  isTurnDurationRow({ type: "system", subtype: "turn_duration", durationMs: 1 } as TranscriptRow)
+);
+ok(
+  "isTurnDurationRow rejects other system rows",
+  !isTurnDurationRow({ type: "system", subtype: "stop_hook_summary" } as TranscriptRow)
+);
+ok(
+  "isTurnDurationRow rejects assistant rows",
+  !isTurnDurationRow({ type: "assistant" } as TranscriptRow)
+);
+
+// waitForTranscriptTurnEnd resolves only once the terminal row has landed,
+// mirroring the Stop-hook-fires-before-turn_duration race.
+const turnEndPath = join(projectFolder, "turn-end.jsonl");
+writeFileSync(
+  turnEndPath,
+  JSON.stringify({ type: "system", subtype: "init" }) + "\n" +
+    JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "hi" }] } }) + "\n"
+);
+ok("transcriptHasTurnEnd false before terminal row", (await transcriptHasTurnEnd(turnEndPath)) === false);
+
+// Times out (returns false) when turn_duration never lands.
+const missedTurnEnd = await waitForTranscriptTurnEnd(turnEndPath, 200);
+ok("waitForTranscriptTurnEnd times out without turn_duration", missedTurnEnd === false);
+
+// Append the stop_hook_summary + turn_duration rows mid-wait; the wait should
+// resolve true once the terminal row appears.
+setTimeout(() => {
+  appendFileSync(turnEndPath, JSON.stringify({ type: "system", subtype: "stop_hook_summary" }) + "\n");
+  appendFileSync(turnEndPath, JSON.stringify({ type: "system", subtype: "turn_duration", durationMs: 42 }) + "\n");
+}, 200);
+const sawTurnEnd = await waitForTranscriptTurnEnd(turnEndPath, 3_000);
+ok("waitForTranscriptTurnEnd resolves once turn_duration lands", sawTurnEnd === true);
+ok("transcriptHasTurnEnd true after terminal row", (await transcriptHasTurnEnd(turnEndPath)) === true);
 
 try { rmSync(projectFolder, { recursive: true, force: true }); } catch {}
 try { rmSync(existingProjectFolder, { recursive: true, force: true }); } catch {}

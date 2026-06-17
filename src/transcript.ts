@@ -212,6 +212,38 @@ export async function tailTranscriptLines(
   }
 }
 
+/**
+ * The terminal row Claude writes for a turn. It lands *after* the Stop hook
+ * fires (and after the stop_hook_summary row), so it's the reliable signal that
+ * the transcript for the turn has been fully flushed to disk.
+ */
+export function isTurnDurationRow(row: TranscriptRow): boolean {
+  return row.type === "system" && (row as { subtype?: unknown }).subtype === "turn_duration";
+}
+
+export async function transcriptHasTurnEnd(transcriptPath: string): Promise<boolean> {
+  return (await readTranscript(transcriptPath)).some(isTurnDurationRow);
+}
+
+/**
+ * Poll until the transcript contains its terminal turn_duration row, or the
+ * timeout elapses. Returns true if the turn-end row landed. Used to avoid
+ * truncating streamed JSONL: the Stop hook fires before Claude appends the
+ * final stop_hook_summary + turn_duration rows.
+ */
+export async function waitForTranscriptTurnEnd(
+  transcriptPath: string,
+  timeoutMs: number,
+  signal?: AbortSignal
+): Promise<boolean> {
+  const startedAt = Date.now();
+  while (!signal?.aborted && Date.now() - startedAt < timeoutMs) {
+    if (await transcriptHasTurnEnd(transcriptPath)) return true;
+    await sleep(POLL_MS);
+  }
+  return false;
+}
+
 export function sessionIdFromPath(transcriptPath: string): string {
   return basename(transcriptPath).replace(/\.jsonl$/, "");
 }
