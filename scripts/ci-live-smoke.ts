@@ -204,22 +204,22 @@ function parseBridgeStreamResult(stdout: string): BridgeResult {
   return final;
 }
 
-// Interactive-only transcript wrapper keys that must NOT leak into claude -p
-// compatible assistant/user events.
-const INTERACTIVE_WRAPPER_KEYS = [
-  "cwd",
-  "gitBranch",
-  "sessionId",
-  "requestId",
-  "timestamp",
-  "version",
-  "isSidechain",
-  "parentUuid",
-  "entrypoint",
-  "userType",
-];
-
 function validateClaudeCompatStream(stdout: string): void {
+  // Interactive-only transcript wrapper keys that must NOT leak into claude -p
+  // compatible assistant/user events. (Declared here, not at module scope, to
+  // avoid a temporal-dead-zone error: validateSmoke runs before module consts.)
+  const INTERACTIVE_WRAPPER_KEYS = [
+    "cwd",
+    "gitBranch",
+    "sessionId",
+    "requestId",
+    "timestamp",
+    "version",
+    "isSidechain",
+    "parentUuid",
+    "entrypoint",
+    "userType",
+  ];
   const rows = parseTranscriptRows(stdout);
 
   // No bridge-owned synthetic delta rows.
