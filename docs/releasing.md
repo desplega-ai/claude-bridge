@@ -103,7 +103,12 @@ Run this before release commits that touch package metadata:
 npm pack --dry-run --json
 ```
 
-The release workflow enforces the same boundary.
+The release workflow enforces the same boundary. Note that `npm pack` does not
+resolve imports, so it will happily build a tarball that omits a runtime source
+a shipped file imports (this is how v0.2.0 shipped without `src/claude-compat.ts`
+and crashed on launch). The `test:package-files` test guards against that by
+asserting every non-test `src/*.ts` is present in the `files` allowlist; it runs
+as part of `bun test`.
 
 ## Recovery
 

@@ -1,6 +1,6 @@
 {
   "name": "@desplega.ai/claude-bridge",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Bridge Claude Code's interactive session through tmux and transcript output.",
   "type": "module",
   "license": "MIT",
@@ -33,6 +33,7 @@
     "src/args.ts",
     "src/auth-env.ts",
     "src/bridge.ts",
+    "src/claude-compat.ts",
     "src/cli.ts",
     "src/hook-install.ts",
     "src/json-schema.ts",
@@ -66,8 +67,9 @@
     "test:preaccept": "bun ./src/test-preaccept.ts",
     "test:print-result": "bun ./src/test-print-result.ts",
     "test:release-script": "bun ./src/test-release-script.ts",
+    "test:package-files": "bun ./src/test-package-files.ts",
     "test:transcript": "bun ./src/test-transcript.ts",
-    "test": "bun run test:smoke && bun run test:transcript && bun run test:args && bun run test:auth-env && bun run test:json-schema && bun run test:launch-command && bun run test:claude-compat && bun run test:model-pricing && bun run test:hooks && bun run test:preaccept && bun run test:print-result && bun run test:release-script",
+    "test": "bun run test:smoke && bun run test:transcript && bun run test:args && bun run test:auth-env && bun run test:json-schema && bun run test:launch-command && bun run test:claude-compat && bun run test:model-pricing && bun run test:hooks && bun run test:preaccept && bun run test:print-result && bun run test:release-script && bun run test:package-files",
     "typecheck": "bun tsc --noEmit"
   },
   "dependencies": {
