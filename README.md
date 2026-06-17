@@ -221,17 +221,29 @@ the JSONL file.
 - `text`: prints only the final answer text plus a trailing newline. Wrapper
   errors go to stderr and exit non-zero.
 - `json`: prints one final Claude-compatible JSON result object with the
-  answer in `result`, plus available transcript metadata such as `session_id`,
-  `duration_ms`, and `usage`.
-- `stream-json`: emits the native Claude session JSONL transcript lines from
-  the live interactive transcript file as Claude appends complete JSONL rows,
-  including native rows such as `{"type":"assistant","message":{...}}`. The
-  bridge learns `transcript_path` from early runtime hook events when available
-  and falls back to transcript discovery / Stop-time catch-up if needed. If the
-  interactive transcript does not include a terminal `{"type":"result",...}`
-  row, the bridge appends one in Claude-compatible result shape from the same
-  Stop-hook assistant text and hydrated transcript metadata. It does not invoke
-  Claude Code's headless `--output-format stream-json`.
+  answer in `result`, plus available metadata: `session_id`, `duration_ms`,
+  `stop_reason`, `usage`, and a `total_cost_usd` recomputed from token usage and
+  models.dev pricing.
+- `stream-json`: emits the same event stream as Claude Code's headless
+  `claude -p --output-format stream-json` — a `system`/`init` event, `assistant`
+  events, `user` events for tool results, and a terminal `result` event — by
+  reshaping the live interactive transcript into that schema. Interactive-only
+  rows (`mode`, `permission-mode`, `attachment`, `ai-title`, `stop_hook_summary`,
+  `turn_duration`) are dropped and wrapper fields are remapped (`sessionId` →
+  `session_id`, `requestId` → `request_id`, etc.). `total_cost_usd` and
+  `modelUsage` are recomputed from token usage and models.dev pricing (see
+  `scripts/update-model-pricing.ts`) and match the headless cost to the cent.
+  Rate-limit / overloaded / retry rows (`system/api_error`) and safety
+  `model_refusal_fallback` rows are surfaced — a superset of headless, which
+  retries silently. Failed turns emit a headless-shaped
+  `subtype:"error_during_execution"` result. Fields only the headless API client
+  can produce (`ttft_ms`, `duration_api_ms`) are emitted as `null`, and the
+  `init` tool/mcp/agent inventory is empty placeholders, because the bridge
+  drives the interactive TUI and never sees them. Full field-level contract in
+  [docs/stream-json-compat.md](docs/stream-json-compat.md). The bridge learns
+  `transcript_path` from early runtime hook events and falls back to transcript
+  discovery / Stop-time catch-up if needed. It does not invoke Claude Code's
+  headless `--output-format stream-json`.
 
 Use `--desplega-format` when you want the older bridge-owned JSON envelopes in
 `json` or `stream-json` modes. This flag is for bridge-specific consumers, not
@@ -257,10 +269,16 @@ Typical `--desplega-format --output-format stream-json` event types are:
 ```
 
 These custom `transcript` events only exist with `--desplega-format`. In the
-default compatibility mode, `stream-json` emits the raw session JSONL rows
-directly as complete lines are appended to the live transcript file, followed
-by a terminal Claude-compatible `result` row when the transcript does not
-already contain one. It does not emit bridge-owned `delta`/`final` rows.
+default compatibility mode, `stream-json` emits the claude -p event schema
+(`system`/`init`, `assistant`, `user`, terminal `result`) synthesized from the
+live transcript as rows are appended — not the raw interactive rows — and never
+emits bridge-owned `delta`/`final` rows.
+
+The compatibility is structural, not byte-identical: some headless-only fields
+are synthesized, approximated, or omitted. See
+[docs/stream-json-compat.md](docs/stream-json-compat.md) for the field-level
+contract and the bridge / Claude Code / models.dev version pins it was verified
+against.
 
 ## Structured JSON
 

@@ -21,14 +21,15 @@ import { randomUUID } from "node:crypto";
 import { preAcceptProject, writeWorkdirSettings } from "./preaccept.ts";
 import { claudeAuthEnvArgs, claudeUnsetEnvArgs } from "./auth-env.ts";
 import {
+  isTurnDurationRow,
   listAllTranscriptPaths,
   projectFolderFromTranscript,
   readTranscript,
-  readTranscriptLines,
   sessionIdFromPath,
   tailTranscript,
   tailTranscriptLines,
   waitForFreshTranscriptForCwd,
+  waitForTranscriptTurnEnd,
   type TranscriptRow,
 } from "./transcript.ts";
 import { formatEnvelope } from "./view.ts";
@@ -51,6 +52,16 @@ import {
 import { makePrintErrorResult } from "./print-result.ts";
 import { runJsonSchemaStopHook, runRuntimeHook } from "./stop-hook.ts";
 import { buildClaudeLaunchCommand } from "./launch-command.ts";
+import {
+  apiErrorStatusFromRow,
+  makeClaudeErrorResultEvent,
+  makeClaudeInitEvent,
+  makeClaudeResultEvent,
+  modelFromAssistantRow,
+  stopReasonFromAssistantRow,
+  transcriptRowToClaudeStreamEvent,
+} from "./claude-compat.ts";
+import type { TokenUsage } from "./model-pricing.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..");
@@ -150,6 +161,10 @@ const CLAUDE_READY_TIMEOUT_MS = envDurationMs("CLAUDE_BRIDGE_CLAUDE_READY_TIMEOU
 const TMUX_SUBMIT_DELAY_MS = envDurationMs("CLAUDE_BRIDGE_TMUX_SUBMIT_DELAY_MS", 1_000);
 const TMUX_EXIT_HOLD_MS = envDurationMs("CLAUDE_BRIDGE_TMUX_EXIT_HOLD_MS", 30_000);
 const MAX_SESSION_MS = envDurationMs("CLAUDE_BRIDGE_MAX_SESSION_MS", 2 * 60 * 60_000);
+// The Stop hook fires before Claude appends the terminal turn_duration row, so
+// after a Stop event we briefly wait for that row to land before finalizing —
+// otherwise streamed JSONL is truncated mid-turn.
+const TURN_END_FLUSH_TIMEOUT_MS = envDurationMs("CLAUDE_BRIDGE_TURN_END_FLUSH_TIMEOUT_MS", 5_000);
 const stopEventPath = join(runDir, "stop-event.json");
 const messageDisplayPath = join(runDir, "message-display.jsonl");
 const transcriptEventPath = join(runDir, "transcript-event.json");
@@ -187,8 +202,14 @@ let pendingPrintResultText = "";
 let pendingPrintFailure: { message: string; rawResponse?: string } | null = null;
 let printDone = false;
 let messageDisplayOffset = 0;
-let streamJsonTranscriptLineCount = 0;
-let streamJsonTranscriptHasResult = false;
+// stream-json compat: synthesize the claude -p event stream from the
+// interactive transcript. We emit init once, then reshaped assistant/user
+// events (dropping interactive-only rows), then a terminal result event.
+let claudeInitEmitted = false;
+let claudeStreamEmittedCount = 0;
+let claudeVersionFromTranscript: string | undefined;
+let transcriptProjectFolder: string | undefined;
+let lastApiErrorStatus: number | null = null;
 
 let rlRef: import("node:readline").Interface | null = null;
 const stdoutLine = (obj: Record<string, unknown>): void => {
@@ -465,22 +486,25 @@ function makeClaudeCompatResult(
   resultText: string,
   structured: { ok: true; value: unknown; source: string } | null
 ): Record<string, unknown> {
-  return {
-    type: "result",
-    subtype: "success",
-    is_error: false,
-    result: resultText,
-    ...(structured ? { structured_output: structured.value } : {}),
-    ...(transcriptSessionId ? { session_id: transcriptSessionId } : {}),
-    ...(lastTurnDurationMs !== undefined ? { duration_ms: lastTurnDurationMs } : {}),
-    num_turns: 1,
-    ...(lastAssistantUsage() ? { usage: lastAssistantUsage() } : {}),
-  };
+  return makeClaudeResultEvent({
+    resultText,
+    sessionId: transcriptSessionId,
+    durationMs: lastTurnDurationMs,
+    model: currentModel(),
+    usage: lastAssistantUsage(),
+    stopReason: lastAssistantRow ? stopReasonFromAssistantRow(lastAssistantRow) : undefined,
+    structuredOutput: structured ? { present: true, value: structured.value } : undefined,
+    uuid: randomUUID(),
+  });
 }
 
-function lastAssistantUsage(): unknown {
+function currentModel(): string | undefined {
+  return lastAssistantRow ? modelFromAssistantRow(lastAssistantRow) : undefined;
+}
+
+function lastAssistantUsage(): TokenUsage | undefined {
   const msg = (lastAssistantRow?.message as Record<string, unknown> | undefined) ?? undefined;
-  return msg?.usage;
+  return msg?.usage as TokenUsage | undefined;
 }
 
 function extractStructuredOutput(
@@ -518,17 +542,26 @@ function failPrint(message: string, details: { rawResponse?: string } = {}): voi
     });
     process.stdout.write(JSON.stringify(result) + "\n");
   } else {
+    // json / stream-json compatibility: emit a headless-shaped error result
+    // (subtype error_during_execution), carrying bridge diagnostics as extras.
+    if (outputFormat === "stream-json") ensureClaudeInit();
     process.stdout.write(
-      JSON.stringify({
-        type: "result",
-        subtype: "error",
-        is_error: true,
-        error: messageWithPaneTail,
-        ...(details.rawResponse !== undefined ? { raw_response: details.rawResponse } : {}),
-        run_state: runDir,
-        ...(failureCapture.paneTail ? { pane_tail: failureCapture.paneTail } : {}),
-        ...(transcriptSessionId ? { session_id: transcriptSessionId } : {}),
-      }) + "\n"
+      JSON.stringify(
+        makeClaudeErrorResultEvent({
+          message: messageWithPaneTail,
+          apiErrorStatus: lastApiErrorStatus,
+          sessionId: transcriptSessionId,
+          durationMs: lastTurnDurationMs,
+          model: currentModel(),
+          usage: lastAssistantUsage(),
+          uuid: randomUUID(),
+          extras: {
+            run_state: runDir,
+            ...(details.rawResponse !== undefined ? { raw_response: details.rawResponse } : {}),
+            ...(failureCapture.paneTail ? { pane_tail: failureCapture.paneTail } : {}),
+          },
+        })
+      ) + "\n"
     );
   }
   shutdown(1);
@@ -614,6 +647,17 @@ async function waitForPrintTurnEnd(): Promise<void> {
     const stopEvent = readRuntimeStopEvent();
     if (stopEvent) {
       emitMessageDisplayEvents();
+      // A normal Stop fires before Claude appends its stop_hook_summary +
+      // terminal turn_duration rows. Wait for that turn-end row to land so the
+      // streamed transcript (and the synthesized result) isn't truncated.
+      if (stopEvent.hook_event_name === "Stop" && stopEvent.transcript_path) {
+        await waitForTranscriptTurnEnd(
+          stopEvent.transcript_path,
+          TURN_END_FLUSH_TIMEOUT_MS,
+          ctrl.signal
+        );
+        emitMessageDisplayEvents();
+      }
       await hydrateTranscriptFromStopEvent(stopEvent);
       if (stopEvent.hook_event_name === "StopFailure") {
         failPrint(runtimeStopFailureMessage(stopEvent), { rawResponse: JSON.stringify(stopEvent) });
@@ -629,12 +673,7 @@ async function waitForPrintTurnEnd(): Promise<void> {
         return;
       }
       if (outputFormat === "stream-json" && !desplegaFormat) {
-        const streamResult = makeStreamJsonResultEvent(resultText);
-        if (!streamResult.ok) {
-          failPrint(streamResult.message, { rawResponse: streamResult.rawResponse });
-          return;
-        }
-        await emitTranscriptJsonLines(stopEvent, streamResult.result, streamJsonTranscriptLineCount);
+        if (!(await emitClaudeStreamResult(stopEvent, resultText))) return;
       }
       finishPrintResult(resultText);
       return;
@@ -696,56 +735,93 @@ async function hydrateTranscriptFromStopEvent(stopEvent: RuntimeStopEvent): Prom
   }
 }
 
-function makeStreamJsonResultEvent(
-  resultText: string
-):
-  | { ok: true; result: Record<string, unknown> }
-  | { ok: false; message: string; rawResponse: string } {
-  const structured = extractStructuredOutput(resultText);
-  if (structured && !structured.ok) return structured;
-  return { ok: true, result: makeClaudeCompatResult(resultText, structured) };
+/** Emit the synthesized claude -p `system/init` event exactly once. */
+function ensureClaudeInit(model?: string): void {
+  if (claudeInitEmitted) return;
+  claudeInitEmitted = true;
+  process.stdout.write(
+    JSON.stringify(
+      makeClaudeInitEvent({
+        sessionId: transcriptSessionId,
+        cwd: targetCwd,
+        model: model ?? currentModel(),
+        version: claudeVersionFromTranscript,
+        uuid: randomUUID(),
+        permissionMode: bypassPermissions ? "bypassPermissions" : "default",
+        apiKeySource: hasDesplegaFlag("local-auth") ? "ANTHROPIC_API_KEY" : "none",
+        memoryPaths: transcriptProjectFolder
+          ? { auto: join(transcriptProjectFolder, "memory") + "/" }
+          : {},
+      })
+    ) + "\n"
+  );
 }
 
-async function emitTranscriptJsonLines(
-  stopEvent: RuntimeStopEvent,
-  resultEvent: Record<string, unknown>,
-  alreadyEmitted = 0
-): Promise<void> {
-  const transcriptPath = stopEvent.transcript_path;
-  if (!transcriptPath) {
-    if (alreadyEmitted > 0) {
-      if (!streamJsonTranscriptHasResult) process.stdout.write(JSON.stringify(resultEvent) + "\n");
-      return;
-    }
-    failPrint("Claude Stop hook fired without transcript_path for stream-json output.");
-    return;
-  }
+function writeClaudeStreamEvent(event: Record<string, unknown>): void {
+  process.stdout.write(JSON.stringify(event) + "\n");
+  claudeStreamEmittedCount++;
+}
 
-  let lines: string[];
-  try {
-    lines = await readTranscriptLines(transcriptPath);
-  } catch (err) {
-    failPrint(`Failed to read Claude transcript for stream-json output: ${(err as Error).message}`);
-    return;
-  }
+/** Live-tail path: reshape one transcript row into a claude -p event (or drop it). */
+function emitClaudeStreamRow(row: TranscriptRow): void {
+  const event = transcriptRowToClaudeStreamEvent(row, transcriptSessionId);
+  if (!event) return;
+  ensureClaudeInit(row.type === "assistant" ? modelFromAssistantRow(row) : undefined);
+  writeClaudeStreamEvent(event);
+}
 
-  if (lines.length === 0 && alreadyEmitted === 0) {
-    failPrint(`Claude transcript was empty for stream-json output: ${transcriptPath}`);
-    return;
-  }
+/**
+ * Drain/fallback path: emit any claude -p events the live tail hasn't yet
+ * (or all of them, if the tail never started). claudeStreamEmittedCount keeps
+ * this idempotent with the live tail since both reshape the same rows in order.
+ */
+function emitClaudeStreamCatchUp(rows: TranscriptRow[]): void {
+  const events = rows
+    .map(row => transcriptRowToClaudeStreamEvent(row, transcriptSessionId))
+    .filter((event): event is Record<string, unknown> => event !== null);
+  if (events.length <= claudeStreamEmittedCount) return;
+  const firstAssistant = rows.find(row => row.type === "assistant");
+  ensureClaudeInit(firstAssistant ? modelFromAssistantRow(firstAssistant) : undefined);
+  for (const event of events.slice(claudeStreamEmittedCount)) writeClaudeStreamEvent(event);
+}
 
-  let hasResult = streamJsonTranscriptHasResult;
-  for (const line of lines.slice(alreadyEmitted)) {
-    process.stdout.write(line + "\n");
-    streamJsonTranscriptLineCount++;
+/**
+ * At turn end: drain remaining transcript events, then emit the terminal
+ * claude -p result event (with recomputed total_cost_usd). Returns false after
+ * a failPrint (e.g. structured-output validation failure).
+ */
+async function emitClaudeStreamResult(stopEvent: RuntimeStopEvent, resultText: string): Promise<boolean> {
+  const structured = extractStructuredOutput(resultText);
+  if (structured && !structured.ok) {
+    failPrint(structured.message, { rawResponse: structured.rawResponse });
+    return false;
   }
-  for (const line of lines) {
+  if (stopEvent.transcript_path) {
     try {
-      const row = JSON.parse(line) as { type?: unknown };
-      if (row.type === "result") hasResult = true;
-    } catch {}
+      emitClaudeStreamCatchUp(await readTranscript(stopEvent.transcript_path));
+    } catch (err) {
+      desplegaDebug("failed to drain transcript for stream-json result", {
+        error: (err as Error).message,
+      });
+    }
   }
-  if (!hasResult) process.stdout.write(JSON.stringify(resultEvent) + "\n");
+  // Even an empty/odd turn gets init before the terminal result, like claude -p.
+  ensureClaudeInit();
+  process.stdout.write(
+    JSON.stringify(
+      makeClaudeResultEvent({
+        resultText,
+        sessionId: transcriptSessionId,
+        durationMs: lastTurnDurationMs,
+        model: currentModel(),
+        usage: lastAssistantUsage(),
+        stopReason: lastAssistantRow ? stopReasonFromAssistantRow(lastAssistantRow) : undefined,
+        structuredOutput: structured ? { present: true, value: structured.value } : undefined,
+        uuid: randomUUID(),
+      })
+    ) + "\n"
+  );
+  return true;
 }
 
 function emitMessageDisplayEvents(): void {
@@ -983,6 +1059,7 @@ async function startTranscriptTail(): Promise<void> {
     return;
   }
   const projectFolder = projectFolderFromTranscript(transcriptPath);
+  transcriptProjectFolder = projectFolder;
   stdoutLine({ type: "transcript_folder", path: projectFolder });
   const sessionId = sessionIdFromPath(transcriptPath);
   transcriptSessionId = sessionId;
@@ -991,16 +1068,14 @@ async function startTranscriptTail(): Promise<void> {
     await tailTranscriptLines(
       transcriptPath,
       (line: string) => {
-        process.stdout.write(line + "\n");
-        streamJsonTranscriptLineCount++;
         let row: TranscriptRow;
         try {
           row = JSON.parse(line) as TranscriptRow;
-          if (row.type === "result") streamJsonTranscriptHasResult = true;
         } catch {
           row = { type: "bridge_parse_error", line };
         }
         handleTranscriptRow(row, line);
+        emitClaudeStreamRow(row);
       },
       ctrl.signal
     );
@@ -1042,6 +1117,12 @@ function handleTranscriptRow(row: TranscriptRow, _rawLine: string): void {
 
   if (!printMode) return;
 
+  if (typeof row.version === "string" && row.version) claudeVersionFromTranscript = row.version;
+  if (row.type === "system" && row.subtype === "api_error") {
+    const status = apiErrorStatusFromRow(row);
+    if (status != null) lastApiErrorStatus = status;
+  }
+
   const type = String(row.type ?? "");
   if (type === "assistant") {
     const msg = (row.message as Record<string, unknown> | undefined) ?? {};
@@ -1053,7 +1134,7 @@ function handleTranscriptRow(row: TranscriptRow, _rawLine: string): void {
     return;
   }
 
-  if (type === "system" && row.subtype === "turn_duration") {
+  if (isTurnDurationRow(row)) {
     if (typeof row.durationMs === "number") lastTurnDurationMs = row.durationMs;
     if (!lastAssistantText) {
       pendingPrintFailure = {
