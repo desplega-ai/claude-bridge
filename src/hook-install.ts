@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 
 export const JSON_SCHEMA_STOP_HOOK_ARG = "--desplega-internal-json-schema-stop-hook";
+export const RUNTIME_HOOK_ARG = "--desplega-internal-runtime-hook";
 
 type HookHandler = {
   type?: string;
@@ -25,11 +26,60 @@ export function globalClaudeSettingsPath(): string {
 }
 
 export function buildJsonSchemaStopHookCommand(argv = process.argv): string {
+  return buildInternalHookCommand(JSON_SCHEMA_STOP_HOOK_ARG, argv);
+}
+
+export function buildRuntimeHookCommand(argv = process.argv): string {
+  return buildInternalHookCommand(RUNTIME_HOOK_ARG, argv);
+}
+
+function buildInternalHookCommand(arg: string, argv = process.argv): string {
   const entry = argv[1] ? resolve(process.cwd(), argv[1]) : resolve("src/cli.ts");
   const parts = entry.endsWith(".ts")
-    ? ["bun", entry, JSON_SCHEMA_STOP_HOOK_ARG]
-    : [entry, JSON_SCHEMA_STOP_HOOK_ARG];
+    ? ["bun", entry, arg]
+    : [entry, arg];
   return parts.map(shellQuote).join(" ");
+}
+
+export function installRuntimeHooks(opts: {
+  settingsPath?: string;
+  command: string;
+}): { settingsPath: string; changed: boolean } {
+  const settingsPath = opts.settingsPath ?? globalClaudeSettingsPath();
+  const settings = readSettings(settingsPath);
+  settings.hooks ??= {};
+
+  const before = JSON.stringify(settings.hooks);
+  settings.hooks.Stop = upsertBridgeHook(settings.hooks.Stop ?? [], opts.command, RUNTIME_HOOK_ARG);
+  settings.hooks.StopFailure = upsertBridgeHook(
+    settings.hooks.StopFailure ?? [],
+    opts.command,
+    RUNTIME_HOOK_ARG
+  );
+  settings.hooks.MessageDisplay = upsertBridgeHook(
+    settings.hooks.MessageDisplay ?? [],
+    opts.command,
+    RUNTIME_HOOK_ARG
+  );
+  settings.hooks.UserPromptSubmit = upsertBridgeHook(
+    settings.hooks.UserPromptSubmit ?? [],
+    opts.command,
+    RUNTIME_HOOK_ARG
+  );
+  settings.hooks.SessionStart = upsertBridgeHook(
+    settings.hooks.SessionStart ?? [],
+    opts.command,
+    RUNTIME_HOOK_ARG
+  );
+  settings.hooks.PreToolUse = upsertBridgeHook(
+    settings.hooks.PreToolUse ?? [],
+    opts.command,
+    RUNTIME_HOOK_ARG
+  );
+
+  const changed = before !== JSON.stringify(settings.hooks);
+  if (changed) writeSettings(settingsPath, settings);
+  return { settingsPath, changed };
 }
 
 export function installJsonSchemaStopHook(opts: {
@@ -114,6 +164,36 @@ function removeStaleJsonSchemaStopHookGroups(groups: HookGroup[], keepCommand?: 
       ),
     }))
     .filter(group => (group.hooks ?? []).length > 0);
+}
+
+function upsertBridgeHook(groups: HookGroup[], command: string, marker: string): HookGroup[] {
+  const current = groups
+    .map(group => ({
+      ...group,
+      hooks: (group.hooks ?? []).filter(
+        handler =>
+          !handler.command?.includes(marker) ||
+          (handler.command === command && group.matcher === "*")
+      ),
+    }))
+    .filter(group => (group.hooks ?? []).length > 0);
+  const alreadyInstalled = current.some(group =>
+    (group.hooks ?? []).some(handler => handler.command === command)
+  );
+  if (alreadyInstalled) return current;
+  return [
+    ...current,
+    {
+      matcher: "*",
+      hooks: [
+        {
+          type: "command",
+          command,
+          timeout: 30,
+        },
+      ],
+    },
+  ];
 }
 
 function countJsonSchemaStopHookHandlers(groups: HookGroup[]): number {

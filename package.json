@@ -1,6 +1,6 @@
 {
   "name": "@desplega.ai/claude-bridge",
-  "version": "0.1.13",
+  "version": "0.2.0",
   "description": "Bridge Claude Code's interactive session through tmux and transcript output.",
   "type": "module",
   "license": "MIT",
@@ -38,6 +38,8 @@
     "src/json-schema.ts",
     "src/launch-command.ts",
     "src/mcp-channel.ts",
+    "src/model-pricing.ts",
+    "src/model-pricing-data.ts",
     "src/preaccept.ts",
     "src/print-result.ts",
     "src/stop-hook.ts",
@@ -58,11 +60,14 @@
     "test:hooks": "bun ./src/test-hooks.ts",
     "test:json-schema": "bun ./src/test-json-schema.ts",
     "test:launch-command": "bun ./src/test-launch-command.ts",
+    "test:claude-compat": "bun ./src/test-claude-compat.ts",
+    "test:model-pricing": "bun ./src/test-model-pricing.ts",
+    "update:model-pricing": "bun ./scripts/update-model-pricing.ts",
     "test:preaccept": "bun ./src/test-preaccept.ts",
     "test:print-result": "bun ./src/test-print-result.ts",
     "test:release-script": "bun ./src/test-release-script.ts",
     "test:transcript": "bun ./src/test-transcript.ts",
-    "test": "bun run test:smoke && bun run test:transcript && bun run test:args && bun run test:auth-env && bun run test:json-schema && bun run test:launch-command && bun run test:hooks && bun run test:preaccept && bun run test:print-result && bun run test:release-script",
+    "test": "bun run test:smoke && bun run test:transcript && bun run test:args && bun run test:auth-env && bun run test:json-schema && bun run test:launch-command && bun run test:claude-compat && bun run test:model-pricing && bun run test:hooks && bun run test:preaccept && bun run test:print-result && bun run test:release-script",
     "typecheck": "bun tsc --noEmit"
   },
   "dependencies": {

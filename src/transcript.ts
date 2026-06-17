@@ -11,7 +11,9 @@
 import { Glob } from "bun";
 import { join, basename, dirname, resolve } from "node:path";
 import { homedir } from "node:os";
+import { readFileSync, statSync } from "node:fs";
 import { readdir } from "node:fs/promises";
+import { StringDecoder } from "node:string_decoder";
 
 export const POLL_MS = 100;
 // Generous because Claude may show first-run screens before writing the
@@ -135,6 +137,10 @@ export async function readTranscript(transcriptPath: string): Promise<Transcript
   return (await readTranscriptEntries(transcriptPath)).map(entry => entry.row);
 }
 
+export async function readTranscriptLines(transcriptPath: string): Promise<string[]> {
+  return (await readTranscriptEntries(transcriptPath)).map(entry => entry.line);
+}
+
 async function readTranscriptEntries(transcriptPath: string): Promise<TranscriptEntry[]> {
   const file = Bun.file(transcriptPath);
   if (!(await file.exists())) return [];
@@ -167,6 +173,78 @@ export async function tailTranscript(
     if (entries.length > emitted) emitted = entries.length;
     await sleep(POLL_MS);
   }
+}
+
+export async function tailTranscriptLines(
+  transcriptPath: string,
+  onLine: (line: string, index: number) => void,
+  signal: AbortSignal
+): Promise<void> {
+  let offset = 0;
+  let buffer = "";
+  let emitted = 0;
+  let decoder = new StringDecoder("utf8");
+  while (!signal.aborted) {
+    try {
+      const size = statSync(transcriptPath).size;
+      if (size < offset) {
+        offset = 0;
+        buffer = "";
+        emitted = 0;
+        decoder = new StringDecoder("utf8");
+      }
+      if (size > offset) {
+        const chunk = decoder.write(readFileSync(transcriptPath).subarray(offset, size));
+        offset = size;
+        buffer += chunk;
+        const newline = buffer.lastIndexOf("\n");
+        if (newline >= 0) {
+          const complete = buffer.slice(0, newline).split("\n");
+          buffer = buffer.slice(newline + 1);
+          for (const line of complete) {
+            if (!line) continue;
+            onLine(line, emitted++);
+            if (signal.aborted) break;
+          }
+        }
+      }
+    } catch {
+      // The transcript may not exist at the exact moment the tail starts.
+    }
+    await sleep(POLL_MS);
+  }
+}
+
+/**
+ * The terminal row Claude writes for a turn. It lands *after* the Stop hook
+ * fires (and after the stop_hook_summary row), so it's the reliable signal that
+ * the transcript for the turn has been fully flushed to disk.
+ */
+export function isTurnDurationRow(row: TranscriptRow): boolean {
+  return row.type === "system" && (row as { subtype?: unknown }).subtype === "turn_duration";
+}
+
+export async function transcriptHasTurnEnd(transcriptPath: string): Promise<boolean> {
+  return (await readTranscript(transcriptPath)).some(isTurnDurationRow);
+}
+
+/**
+ * Poll until the transcript contains its terminal turn_duration row, or the
+ * timeout elapses. Returns true if the turn-end row landed. Used to avoid
+ * truncating streamed JSONL: the Stop hook fires before Claude appends the
+ * final stop_hook_summary + turn_duration rows.
+ */
+export async function waitForTranscriptTurnEnd(
+  transcriptPath: string,
+  timeoutMs: number,
+  signal?: AbortSignal
+): Promise<boolean> {
+  const startedAt = Date.now();
+  while (!signal?.aborted && Date.now() - startedAt < timeoutMs) {
+    if (await transcriptHasTurnEnd(transcriptPath)) return true;
+    await sleep(POLL_MS);
+  }
+  return false;
 }
 
 export function sessionIdFromPath(transcriptPath: string): string {

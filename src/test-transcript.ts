@@ -10,11 +10,16 @@ import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
+  isTurnDurationRow,
   listAllTranscriptPaths,
   listTranscriptPaths,
+  readTranscriptLines,
+  transcriptHasTurnEnd,
   waitForFreshTranscript,
   waitForFreshTranscriptForCwd,
+  waitForTranscriptTurnEnd,
   tailTranscript,
+  tailTranscriptLines,
   sessionIdFromPath,
   projectKeyForCwd,
   projectFolderFromTranscript,
@@ -108,6 +113,78 @@ ok("turn_duration row last", seen[3]?.type === "system" && (seen[3] as any).subt
 // no duplicates
 const userCount = seen.filter(r => r.type === "user").length;
 ok("user row appears exactly once", userCount === 1);
+
+const rawLines = await readTranscriptLines(transcriptPath);
+ok("readTranscriptLines preserves raw JSONL lines", rawLines[2]?.includes("\"assistant\"") === true);
+
+const partialPath = join(projectFolder, "partial.jsonl");
+writeFileSync(partialPath, "");
+const partialCtrl = new AbortController();
+const partialLines: string[] = [];
+const partialTail = tailTranscriptLines(partialPath, line => partialLines.push(line), partialCtrl.signal);
+appendFileSync(partialPath, JSON.stringify({ type: "user", message: "partial" }));
+await new Promise(r => setTimeout(r, 250));
+ok("tailTranscriptLines buffers partial line", partialLines.length === 0);
+appendFileSync(partialPath, "\n" + JSON.stringify({ type: "assistant", message: "complete" }) + "\n");
+await new Promise(r => setTimeout(r, 250));
+partialCtrl.abort();
+await partialTail;
+ok("tailTranscriptLines emits completed partial after newline", partialLines[0]?.includes("\"partial\"") === true);
+ok("tailTranscriptLines emits later complete line", partialLines[1]?.includes("\"assistant\"") === true);
+
+const utf8Path = join(projectFolder, "utf8.jsonl");
+writeFileSync(utf8Path, "");
+const utf8Ctrl = new AbortController();
+const utf8Lines: string[] = [];
+const utf8Tail = tailTranscriptLines(utf8Path, line => utf8Lines.push(line), utf8Ctrl.signal);
+const utf8Line = Buffer.from(JSON.stringify({ type: "assistant", message: "hello 😀" }) + "\n");
+const emojiOffset = utf8Line.indexOf(Buffer.from("😀"));
+appendFileSync(utf8Path, utf8Line.subarray(0, emojiOffset + 2));
+await new Promise(r => setTimeout(r, 250));
+ok("tailTranscriptLines buffers split UTF-8 character before newline", utf8Lines.length === 0);
+appendFileSync(utf8Path, utf8Line.subarray(emojiOffset + 2));
+await new Promise(r => setTimeout(r, 250));
+utf8Ctrl.abort();
+await utf8Tail;
+ok("tailTranscriptLines preserves split UTF-8 character", utf8Lines[0] === utf8Line.toString("utf8").trimEnd());
+
+// isTurnDurationRow recognizes only the terminal turn_duration system row.
+ok(
+  "isTurnDurationRow matches turn_duration",
+  isTurnDurationRow({ type: "system", subtype: "turn_duration", durationMs: 1 } as TranscriptRow)
+);
+ok(
+  "isTurnDurationRow rejects other system rows",
+  !isTurnDurationRow({ type: "system", subtype: "stop_hook_summary" } as TranscriptRow)
+);
+ok(
+  "isTurnDurationRow rejects assistant rows",
+  !isTurnDurationRow({ type: "assistant" } as TranscriptRow)
+);
+
+// waitForTranscriptTurnEnd resolves only once the terminal row has landed,
+// mirroring the Stop-hook-fires-before-turn_duration race.
+const turnEndPath = join(projectFolder, "turn-end.jsonl");
+writeFileSync(
+  turnEndPath,
+  JSON.stringify({ type: "system", subtype: "init" }) + "\n" +
+    JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "hi" }] } }) + "\n"
+);
+ok("transcriptHasTurnEnd false before terminal row", (await transcriptHasTurnEnd(turnEndPath)) === false);
+
+// Times out (returns false) when turn_duration never lands.
+const missedTurnEnd = await waitForTranscriptTurnEnd(turnEndPath, 200);
+ok("waitForTranscriptTurnEnd times out without turn_duration", missedTurnEnd === false);
+
+// Append the stop_hook_summary + turn_duration rows mid-wait; the wait should
+// resolve true once the terminal row appears.
+setTimeout(() => {
+  appendFileSync(turnEndPath, JSON.stringify({ type: "system", subtype: "stop_hook_summary" }) + "\n");
+  appendFileSync(turnEndPath, JSON.stringify({ type: "system", subtype: "turn_duration", durationMs: 42 }) + "\n");
+}, 200);
+const sawTurnEnd = await waitForTranscriptTurnEnd(turnEndPath, 3_000);
+ok("waitForTranscriptTurnEnd resolves once turn_duration lands", sawTurnEnd === true);
+ok("transcriptHasTurnEnd true after terminal row", (await transcriptHasTurnEnd(turnEndPath)) === true);
 
 try { rmSync(projectFolder, { recursive: true, force: true }); } catch {}
 try { rmSync(existingProjectFolder, { recursive: true, force: true }); } catch {}

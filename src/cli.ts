@@ -21,11 +21,15 @@ import { randomUUID } from "node:crypto";
 import { preAcceptProject, writeWorkdirSettings } from "./preaccept.ts";
 import { claudeAuthEnvArgs, claudeUnsetEnvArgs } from "./auth-env.ts";
 import {
+  isTurnDurationRow,
   listAllTranscriptPaths,
   projectFolderFromTranscript,
+  readTranscript,
   sessionIdFromPath,
   tailTranscript,
+  tailTranscriptLines,
   waitForFreshTranscriptForCwd,
+  waitForTranscriptTurnEnd,
   type TranscriptRow,
 } from "./transcript.ts";
 import { formatEnvelope } from "./view.ts";
@@ -40,12 +44,24 @@ import {
 } from "./json-schema.ts";
 import {
   buildJsonSchemaStopHookCommand,
+  buildRuntimeHookCommand,
   installJsonSchemaStopHook,
+  installRuntimeHooks,
   uninstallJsonSchemaStopHook,
 } from "./hook-install.ts";
 import { makePrintErrorResult } from "./print-result.ts";
-import { runJsonSchemaStopHook } from "./stop-hook.ts";
-import { buildClaudeLaunchCommand, buildClaudePrintLaunchCommand } from "./launch-command.ts";
+import { runJsonSchemaStopHook, runRuntimeHook } from "./stop-hook.ts";
+import { buildClaudeLaunchCommand } from "./launch-command.ts";
+import {
+  apiErrorStatusFromRow,
+  makeClaudeErrorResultEvent,
+  makeClaudeInitEvent,
+  makeClaudeResultEvent,
+  modelFromAssistantRow,
+  stopReasonFromAssistantRow,
+  transcriptRowToClaudeStreamEvent,
+} from "./claude-compat.ts";
+import type { TokenUsage } from "./model-pricing.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..");
@@ -84,6 +100,11 @@ const desplegaFormat = hasDesplegaFlag("format");
 
 if (hasDesplegaFlag("internal-json-schema-stop-hook")) {
   await runJsonSchemaStopHook();
+  process.exit(0);
+}
+
+if (hasDesplegaFlag("internal-runtime-hook")) {
+  await runRuntimeHook();
   process.exit(0);
 }
 
@@ -136,20 +157,23 @@ mkdirSync(runDir, { recursive: true });
 const jsonSchemaPath = jsonSchema ? join(runDir, "json-schema.json") : undefined;
 const claudeExitStatusPath = join(runDir, "claude-exit-status");
 const sessionName = `claude-bridge-${runId.slice(-8)}`;
-const PRINT_READY_TIMEOUT_MS = envDurationMs(
-  "CLAUDE_BRIDGE_PRINT_READY_TIMEOUT_MS",
-  envDurationMs("CLAUDE_BRIDGE_PRINT_CHANNEL_TIMEOUT_MS", 180_000)
-);
-const PRINT_REPLY_TIMEOUT_MS = envDurationMs("CLAUDE_BRIDGE_PRINT_REPLY_TIMEOUT_MS", 10 * 60_000);
 const CLAUDE_READY_TIMEOUT_MS = envDurationMs("CLAUDE_BRIDGE_CLAUDE_READY_TIMEOUT_MS", 180_000);
 const TMUX_SUBMIT_DELAY_MS = envDurationMs("CLAUDE_BRIDGE_TMUX_SUBMIT_DELAY_MS", 1_000);
 const TMUX_EXIT_HOLD_MS = envDurationMs("CLAUDE_BRIDGE_TMUX_EXIT_HOLD_MS", 30_000);
 const MAX_SESSION_MS = envDurationMs("CLAUDE_BRIDGE_MAX_SESSION_MS", 2 * 60 * 60_000);
+// The Stop hook fires before Claude appends the terminal turn_duration row, so
+// after a Stop event we briefly wait for that row to land before finalizing —
+// otherwise streamed JSONL is truncated mid-turn.
+const TURN_END_FLUSH_TIMEOUT_MS = envDurationMs("CLAUDE_BRIDGE_TURN_END_FLUSH_TIMEOUT_MS", 5_000);
+const stopEventPath = join(runDir, "stop-event.json");
+const messageDisplayPath = join(runDir, "message-display.jsonl");
+const transcriptEventPath = join(runDir, "transcript-event.json");
 
 if (jsonSchemaPath && jsonSchema) {
   writeFileSync(jsonSchemaPath, jsonSchema.compact + "\n");
   installJsonSchemaStopHook({ command: buildJsonSchemaStopHookCommand() });
 }
+installRuntimeHooks({ command: buildRuntimeHookCommand() });
 
 preAcceptProject({ workdir: targetCwd, mcpServerNames: [] });
 const runningAsRoot = typeof process.getuid === "function" && process.getuid() === 0;
@@ -176,10 +200,16 @@ let lastAssistantRow: TranscriptRow | null = null;
 let lastTurnDurationMs: number | undefined;
 let pendingPrintResultText = "";
 let pendingPrintFailure: { message: string; rawResponse?: string } | null = null;
-let streamJsonResultSeen = false;
 let printDone = false;
-let printReadyTimer: ReturnType<typeof setTimeout> | null = null;
-let printReplyTimer: ReturnType<typeof setTimeout> | null = null;
+let messageDisplayOffset = 0;
+// stream-json compat: synthesize the claude -p event stream from the
+// interactive transcript. We emit init once, then reshaped assistant/user
+// events (dropping interactive-only rows), then a terminal result event.
+let claudeInitEmitted = false;
+let claudeStreamEmittedCount = 0;
+let claudeVersionFromTranscript: string | undefined;
+let transcriptProjectFolder: string | undefined;
+let lastApiErrorStatus: number | null = null;
 
 let rlRef: import("node:readline").Interface | null = null;
 const stdoutLine = (obj: Record<string, unknown>): void => {
@@ -348,7 +378,6 @@ function sendUserMessage(text: string): string | null {
   const sent = sendPromptToTmux(text, id);
   if (!sent) return null;
   stdoutLine({ type: "push", id, content: text, transport: "tmux" });
-  if (printMode && !printReplyTimer) startPrintReplyTimer();
   return id;
 }
 
@@ -431,7 +460,6 @@ function finishPrintResult(resultText: string): void {
   }
 
   printDone = true;
-  clearPrintTimers();
   if (outputFormat === "text") {
     const text = structured ? JSON.stringify(structured.value) : resultText;
     process.stdout.write(text.endsWith("\n") ? text : text + "\n");
@@ -458,22 +486,25 @@ function makeClaudeCompatResult(
   resultText: string,
   structured: { ok: true; value: unknown; source: string } | null
 ): Record<string, unknown> {
-  return {
-    type: "result",
-    subtype: "success",
-    is_error: false,
-    result: resultText,
-    ...(structured ? { structured_output: structured.value } : {}),
-    ...(transcriptSessionId ? { session_id: transcriptSessionId } : {}),
-    ...(lastTurnDurationMs !== undefined ? { duration_ms: lastTurnDurationMs } : {}),
-    num_turns: 1,
-    ...(lastAssistantUsage() ? { usage: lastAssistantUsage() } : {}),
-  };
+  return makeClaudeResultEvent({
+    resultText,
+    sessionId: transcriptSessionId,
+    durationMs: lastTurnDurationMs,
+    model: currentModel(),
+    usage: lastAssistantUsage(),
+    stopReason: lastAssistantRow ? stopReasonFromAssistantRow(lastAssistantRow) : undefined,
+    structuredOutput: structured ? { present: true, value: structured.value } : undefined,
+    uuid: randomUUID(),
+  });
 }
 
-function lastAssistantUsage(): unknown {
+function currentModel(): string | undefined {
+  return lastAssistantRow ? modelFromAssistantRow(lastAssistantRow) : undefined;
+}
+
+function lastAssistantUsage(): TokenUsage | undefined {
   const msg = (lastAssistantRow?.message as Record<string, unknown> | undefined) ?? undefined;
-  return msg?.usage;
+  return msg?.usage as TokenUsage | undefined;
 }
 
 function extractStructuredOutput(
@@ -486,55 +517,9 @@ function extractStructuredOutput(
   return extractAndValidateStructuredOutput(text, jsonSchema.schema);
 }
 
-function startPrintReadyTimer(): void {
-  if (!printMode || printReadyTimer) return;
-  printReadyTimer = setTimeout(() => {
-    failPrint(
-      `Timed out after ${PRINT_READY_TIMEOUT_MS / 1000}s waiting for Claude to become ready.`
-    );
-  }, PRINT_READY_TIMEOUT_MS);
-}
-
-function startPrintReplyTimer(): void {
-  if (!printMode || printReplyTimer) return;
-  printReplyTimer = setTimeout(() => {
-    failPrint(
-      `Timed out after ${PRINT_REPLY_TIMEOUT_MS / 1000}s of inactivity waiting for Claude output.`
-    );
-  }, PRINT_REPLY_TIMEOUT_MS);
-}
-
-function resetPrintReplyTimer(): void {
-  clearPrintReplyTimer();
-  if (!printMode) return;
-  printReplyTimer = setTimeout(() => {
-    failPrint(
-      `Timed out after ${PRINT_REPLY_TIMEOUT_MS / 1000}s of inactivity waiting for Claude output.`
-    );
-  }, PRINT_REPLY_TIMEOUT_MS);
-}
-
-function clearPrintReadyTimer(): void {
-  if (!printReadyTimer) return;
-  clearTimeout(printReadyTimer);
-  printReadyTimer = null;
-}
-
-function clearPrintReplyTimer(): void {
-  if (!printReplyTimer) return;
-  clearTimeout(printReplyTimer);
-  printReplyTimer = null;
-}
-
-function clearPrintTimers(): void {
-  clearPrintReadyTimer();
-  clearPrintReplyTimer();
-}
-
 function failPrint(message: string, details: { rawResponse?: string } = {}): void {
   if (printDone) return;
   printDone = true;
-  clearPrintTimers();
   const failureCapture = captureFailurePane();
   const messageWithPaneTail = appendPaneTail(message, failureCapture.paneTail);
   if (outputFormat === "text") {
@@ -557,29 +542,45 @@ function failPrint(message: string, details: { rawResponse?: string } = {}): voi
     });
     process.stdout.write(JSON.stringify(result) + "\n");
   } else {
+    // json / stream-json compatibility: emit a headless-shaped error result
+    // (subtype error_during_execution), carrying bridge diagnostics as extras.
+    if (outputFormat === "stream-json") ensureClaudeInit();
     process.stdout.write(
-      JSON.stringify({
-        type: "result",
-        subtype: "error",
-        is_error: true,
-        error: messageWithPaneTail,
-        ...(details.rawResponse !== undefined ? { raw_response: details.rawResponse } : {}),
-        run_state: runDir,
-        ...(failureCapture.paneTail ? { pane_tail: failureCapture.paneTail } : {}),
-        ...(transcriptSessionId ? { session_id: transcriptSessionId } : {}),
-      }) + "\n"
+      JSON.stringify(
+        makeClaudeErrorResultEvent({
+          message: messageWithPaneTail,
+          apiErrorStatus: lastApiErrorStatus,
+          sessionId: transcriptSessionId,
+          durationMs: lastTurnDurationMs,
+          model: currentModel(),
+          usage: lastAssistantUsage(),
+          uuid: randomUUID(),
+          extras: {
+            run_state: runDir,
+            ...(details.rawResponse !== undefined ? { raw_response: details.rawResponse } : {}),
+            ...(failureCapture.paneTail ? { pane_tail: failureCapture.paneTail } : {}),
+          },
+        })
+      ) + "\n"
     );
   }
   shutdown(1);
 }
 
 function startTmux(): void {
+  // BILLING INVARIANT: never pass `-p`/`--print`, Agent SDK flags, or
+  // headless `--output-format stream-json` to Claude. Claude Code computes
+  // interactive billing as `!(hasPrint || hasInitOnly || hasSdkUrl ||
+  // !stdout.isTTY)`, so the bridge must launch the real TUI in a tmux pty and
+  // synthesize print/json output itself.
   const claudeArgs = [
     ...(bypassPermissions ? ["--dangerously-skip-permissions"] : []),
     ...forwardedClaudeArgs,
   ];
   const envArgs = [
     ...claudeAuthEnvArgs(process.env, { localAuth: hasDesplegaFlag("local-auth") }),
+    "CLAUDE_BRIDGE_RUNTIME_HOOK=1",
+    `CLAUDE_BRIDGE_RUN_DIR=${runDir}`,
     ...(jsonSchemaPath
       ? [
           "CLAUDE_BRIDGE_SCHEMA_STOP_HOOK=1",
@@ -588,11 +589,6 @@ function startTmux(): void {
         ]
       : []),
   ];
-
-  if (printMode && initialMessage) {
-    startTmuxPrintMode(claudeArgs, envArgs);
-    return;
-  }
 
   const launchCommand = buildClaudeLaunchCommand({
     claudePath,
@@ -629,174 +625,235 @@ function startTmux(): void {
   void autoAcceptStartupPrompts();
   void waitForClaudeReady();
   void startTranscriptTail();
+  if (printMode) void waitForPrintTurnEnd();
   if (!printMode) printBanner();
 }
 
-/**
- * Print-mode alternative: run Claude with `-p` inside tmux and redirect
- * stdout to a file. This avoids the broken JSONL transcript dependency
- * (Claude Code >=2.1.x no longer writes per-session transcript files).
- */
-function startTmuxPrintMode(claudeArgs: string[], envArgs: string[]): void {
-  const promptFile = join(runDir, "prompt.txt");
-  const stdoutFile = join(runDir, "stdout.jsonl");
-  writeFileSync(promptFile, initialMessage!);
+type RuntimeStopEvent = {
+  hook_event_name?: string;
+  transcript_path?: string;
+  last_assistant_message?: string;
+  message?: unknown;
+  reason?: unknown;
+  error?: unknown;
+};
 
-  const launchCommand = buildClaudePrintLaunchCommand({
-    claudePath,
-    claudeArgs,
-    unsetEnvArgs: claudeUnsetEnvArgs(),
-    envArgs,
-    exitStatusPath: claudeExitStatusPath,
-    holdMs: TMUX_EXIT_HOLD_MS,
-    promptFile,
-    stdoutFile,
-  });
-
-  desplegaDebug("starting claude in tmux (print mode)", {
-    sessionName,
-    claudePath,
-    claudeArgs,
-    bypassPermissions,
-    promptFile,
-    stdoutFile,
-  });
-
-  const newSession = [
-    "new-session",
-    "-d",
-    "-s",
-    sessionName,
-    "-x",
-    "220",
-    "-y",
-    "50",
-    "-c",
-    targetCwd,
-    launchCommand,
-  ];
-  const res = spawnSync(tmuxPath, newSession, { stdio: "inherit" });
-  if (res.status !== 0) {
-    process.stderr.write(`[claude-bridge] tmux new-session exited ${res.status}\n`);
-    process.exit(1);
-  }
-
-  void tailPrintOutput(stdoutFile);
-}
-
-async function tailPrintOutput(stdoutFile: string): Promise<void> {
+async function waitForPrintTurnEnd(): Promise<void> {
   const POLL_MS = 100;
-  const TMUX_LIVENESS_CHECK_MS = 1000;
   const startedAt = Date.now();
-  let lastTmuxCheckAt = 0;
-  let byteOffset = 0;
-
-  const processNewContent = (content: string): void => {
-    const lines = content.split("\n");
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-
-      if (outputFormat === "stream-json" && !desplegaFormat) {
-        process.stdout.write(trimmed + "\n");
-        // Detect the result row, but still wait for claude-exit-status.
-        if (trimmed.startsWith('{"type":"result"')) {
-          streamJsonResultSeen = true;
-        }
-      } else {
-        try {
-          const row = JSON.parse(trimmed) as TranscriptRow;
-          handleTranscriptRow(row, trimmed);
-        } catch {
-          // Not valid JSON — skip
-        }
-      }
-    }
-  };
-
   while (!ctrl.signal.aborted && Date.now() - startedAt < MAX_SESSION_MS) {
-    let text = "";
-    try {
-      text = readFileSync(stdoutFile, "utf8");
-    } catch {
-      // File may not exist yet — Claude hasn't started writing
-    }
+    emitMessageDisplayEvents();
 
-    if (text.length > byteOffset) {
-      if (byteOffset === 0) {
-        clearPrintReadyTimer();
-        desplegaDebug("claude output detected, ready timer cleared");
+    const stopEvent = readRuntimeStopEvent();
+    if (stopEvent) {
+      emitMessageDisplayEvents();
+      // A normal Stop fires before Claude appends its stop_hook_summary +
+      // terminal turn_duration rows. Wait for that turn-end row to land so the
+      // streamed transcript (and the synthesized result) isn't truncated.
+      if (stopEvent.hook_event_name === "Stop" && stopEvent.transcript_path) {
+        await waitForTranscriptTurnEnd(
+          stopEvent.transcript_path,
+          TURN_END_FLUSH_TIMEOUT_MS,
+          ctrl.signal
+        );
+        emitMessageDisplayEvents();
       }
-      resetPrintReplyTimer();
-      processNewContent(text.substring(byteOffset));
-      byteOffset = text.length;
-    }
-
-    const exitStatus = readClaudeExitStatus();
-    if (exitStatus !== null) {
-      // Final flush — read any remaining bytes written between last poll and exit
-      try {
-        const finalText = readFileSync(stdoutFile, "utf8");
-        if (finalText.length > byteOffset) {
-          processNewContent(finalText.substring(byteOffset));
-        }
-      } catch {}
-
-      if (exitStatus !== "0") {
-        const stderrContent = readStderrLog(stdoutFile);
-        const msg = stderrContent
-          ? `Claude exited with status ${exitStatus}: ${stderrContent}`
-          : `Claude exited with status ${exitStatus}`;
-        failPrint(msg);
-      } else if (printDone || streamJsonResultSeen) {
-        shutdown(0);
-      } else if (pendingPrintFailure) {
+      await hydrateTranscriptFromStopEvent(stopEvent);
+      if (stopEvent.hook_event_name === "StopFailure") {
+        failPrint(runtimeStopFailureMessage(stopEvent), { rawResponse: JSON.stringify(stopEvent) });
+        return;
+      }
+      if (pendingPrintFailure) {
         failPrint(pendingPrintFailure.message, { rawResponse: pendingPrintFailure.rawResponse });
-      } else if (pendingPrintResultText || lastAssistantText) {
-        finishPrintResult(pendingPrintResultText || lastAssistantText);
-      } else {
-        desplegaDebug("claude exited 0 with no output — clean shutdown");
-        shutdown(0);
+        return;
       }
+      const stopAssistantText =
+        typeof stopEvent.last_assistant_message === "string" && stopEvent.last_assistant_message !== ""
+          ? stopEvent.last_assistant_message
+          : undefined;
+      const resultText = stopAssistantText ?? pendingPrintResultText ?? lastAssistantText;
+      if (resultText === undefined || resultText === "") {
+        failPrint("Claude Stop hook fired without assistant text.");
+        return;
+      }
+      if (outputFormat === "stream-json" && !desplegaFormat) {
+        if (!(await emitClaudeStreamResult(stopEvent, resultText))) return;
+      }
+      finishPrintResult(resultText);
       return;
     }
 
-    const now = Date.now();
-    if (
-      !printDone &&
-      !streamJsonResultSeen &&
-      now - lastTmuxCheckAt >= TMUX_LIVENESS_CHECK_MS
-    ) {
-      lastTmuxCheckAt = now;
-      if (!tmuxSessionExists()) {
-        failPrint(
-          "tmux session/server died before Claude produced a result - likely OOM-killed or container restart."
-        );
-        return;
-      }
+    const exitStatus = readClaudeExitStatus();
+    if (exitStatus !== null && exitStatus !== "0") {
+      failPrint(`Claude exited with status ${exitStatus} before the Stop hook produced a result.`);
+      return;
     }
-
+    if (!tmuxSessionExists()) {
+      failPrint("tmux session/server died before the Stop hook produced a result.");
+      return;
+    }
     await sleep(POLL_MS);
   }
 
   if (!printDone) {
     const elapsed = Math.round((Date.now() - startedAt) / 1000);
-    const stderrContent = readStderrLog(stdoutFile);
-    const detail = stderrContent
-      ? `stderr: ${stderrContent}`
-      : "no stderr output captured";
-    failPrint(
-      `Session safety ceiling reached after ${elapsed}s (CLAUDE_BRIDGE_MAX_SESSION_MS=${MAX_SESSION_MS}). ${detail}`
-    );
+    failPrint(`Session safety ceiling reached after ${elapsed}s waiting for the Stop hook event.`);
   }
 }
 
-function readStderrLog(stdoutFile: string): string {
-  const stderrFile = stdoutFile.replace(/\.jsonl$/, ".stderr.log");
+function readRuntimeStopEvent(): RuntimeStopEvent | null {
+  if (!existsSync(stopEventPath)) return null;
   try {
-    return readFileSync(stderrFile, "utf8").trim();
+    const event = JSON.parse(readFileSync(stopEventPath, "utf8")) as RuntimeStopEvent;
+    return event.hook_event_name === "Stop" || event.hook_event_name === "StopFailure" ? event : null;
   } catch {
-    return "";
+    return null;
+  }
+}
+
+function runtimeStopFailureMessage(stopEvent: RuntimeStopEvent): string {
+  for (const field of [stopEvent.error, stopEvent.reason, stopEvent.message]) {
+    if (typeof field === "string" && field.trim()) {
+      return `Claude StopFailure hook fired: ${field.trim()}`;
+    }
+  }
+  return "Claude StopFailure hook fired before the Stop hook produced a result.";
+}
+
+async function hydrateTranscriptFromStopEvent(stopEvent: RuntimeStopEvent): Promise<void> {
+  const transcriptPath = stopEvent.transcript_path;
+  if (!transcriptPath) return;
+  transcriptSessionId = sessionIdFromPath(transcriptPath);
+  try {
+    const rows = await readTranscript(transcriptPath);
+    rows.forEach((row, index) => handleTranscriptRow(row, JSON.stringify(row)));
+    desplegaDebug("hydrated final transcript from Stop hook", {
+      transcriptPath,
+      rows: rows.length,
+    });
+  } catch (err) {
+    desplegaDebug("failed to hydrate transcript from Stop hook", {
+      transcriptPath,
+      error: (err as Error).message,
+    });
+  }
+}
+
+/** Emit the synthesized claude -p `system/init` event exactly once. */
+function ensureClaudeInit(model?: string): void {
+  if (claudeInitEmitted) return;
+  claudeInitEmitted = true;
+  process.stdout.write(
+    JSON.stringify(
+      makeClaudeInitEvent({
+        sessionId: transcriptSessionId,
+        cwd: targetCwd,
+        model: model ?? currentModel(),
+        version: claudeVersionFromTranscript,
+        uuid: randomUUID(),
+        permissionMode: bypassPermissions ? "bypassPermissions" : "default",
+        apiKeySource: hasDesplegaFlag("local-auth") ? "ANTHROPIC_API_KEY" : "none",
+        memoryPaths: transcriptProjectFolder
+          ? { auto: join(transcriptProjectFolder, "memory") + "/" }
+          : {},
+      })
+    ) + "\n"
+  );
+}
+
+function writeClaudeStreamEvent(event: Record<string, unknown>): void {
+  process.stdout.write(JSON.stringify(event) + "\n");
+  claudeStreamEmittedCount++;
+}
+
+/** Live-tail path: reshape one transcript row into a claude -p event (or drop it). */
+function emitClaudeStreamRow(row: TranscriptRow): void {
+  const event = transcriptRowToClaudeStreamEvent(row, transcriptSessionId);
+  if (!event) return;
+  ensureClaudeInit(row.type === "assistant" ? modelFromAssistantRow(row) : undefined);
+  writeClaudeStreamEvent(event);
+}
+
+/**
+ * Drain/fallback path: emit any claude -p events the live tail hasn't yet
+ * (or all of them, if the tail never started). claudeStreamEmittedCount keeps
+ * this idempotent with the live tail since both reshape the same rows in order.
+ */
+function emitClaudeStreamCatchUp(rows: TranscriptRow[]): void {
+  const events = rows
+    .map(row => transcriptRowToClaudeStreamEvent(row, transcriptSessionId))
+    .filter((event): event is Record<string, unknown> => event !== null);
+  if (events.length <= claudeStreamEmittedCount) return;
+  const firstAssistant = rows.find(row => row.type === "assistant");
+  ensureClaudeInit(firstAssistant ? modelFromAssistantRow(firstAssistant) : undefined);
+  for (const event of events.slice(claudeStreamEmittedCount)) writeClaudeStreamEvent(event);
+}
+
+/**
+ * At turn end: drain remaining transcript events, then emit the terminal
+ * claude -p result event (with recomputed total_cost_usd). Returns false after
+ * a failPrint (e.g. structured-output validation failure).
+ */
+async function emitClaudeStreamResult(stopEvent: RuntimeStopEvent, resultText: string): Promise<boolean> {
+  const structured = extractStructuredOutput(resultText);
+  if (structured && !structured.ok) {
+    failPrint(structured.message, { rawResponse: structured.rawResponse });
+    return false;
+  }
+  if (stopEvent.transcript_path) {
+    try {
+      emitClaudeStreamCatchUp(await readTranscript(stopEvent.transcript_path));
+    } catch (err) {
+      desplegaDebug("failed to drain transcript for stream-json result", {
+        error: (err as Error).message,
+      });
+    }
+  }
+  // Even an empty/odd turn gets init before the terminal result, like claude -p.
+  ensureClaudeInit();
+  process.stdout.write(
+    JSON.stringify(
+      makeClaudeResultEvent({
+        resultText,
+        sessionId: transcriptSessionId,
+        durationMs: lastTurnDurationMs,
+        model: currentModel(),
+        usage: lastAssistantUsage(),
+        stopReason: lastAssistantRow ? stopReasonFromAssistantRow(lastAssistantRow) : undefined,
+        structuredOutput: structured ? { present: true, value: structured.value } : undefined,
+        uuid: randomUUID(),
+      })
+    ) + "\n"
+  );
+  return true;
+}
+
+function emitMessageDisplayEvents(): void {
+  if (!existsSync(messageDisplayPath)) return;
+  let text = "";
+  try {
+    text = readFileSync(messageDisplayPath, "utf8");
+  } catch {
+    return;
+  }
+  if (text.length <= messageDisplayOffset) return;
+  const chunk = text.slice(messageDisplayOffset);
+  messageDisplayOffset = text.length;
+  for (const line of chunk.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let row: Record<string, unknown>;
+    try {
+      row = JSON.parse(trimmed) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const delta = typeof row.delta === "string" ? row.delta : "";
+    if (outputFormat === "stream-json" && !desplegaFormat) {
+      continue;
+    } else {
+      stdoutLine({ type: "message_display", delta });
+    }
   }
 }
 
@@ -929,7 +986,6 @@ async function waitForClaudeReady(): Promise<void> {
     }
     if (isClaudePaneReady(pane)) {
       claudeReady = true;
-      clearPrintReadyTimer();
       desplegaDebug("claude pane ready");
       if (!flushPendingMessages()) promptIfReady();
       return;
@@ -982,12 +1038,17 @@ function isClaudePaneReady(pane: string): boolean {
 }
 
 async function startTranscriptTail(): Promise<void> {
+  const compatStreamJsonPrint = printMode && outputFormat === "stream-json" && !desplegaFormat;
   let transcriptPath: string;
   try {
-    transcriptPath = await waitForFreshTranscriptForCwd(targetCwd, transcriptsBefore, ctrl.signal);
+    transcriptPath =
+      (compatStreamJsonPrint ? await waitForRuntimeTranscriptPath(1_500) : null) ??
+      await waitForFreshTranscriptForCwd(targetCwd, transcriptsBefore, ctrl.signal);
   } catch (err) {
     if (printMode) {
-      failPrint((err as Error).message);
+      desplegaDebug("live transcript discovery failed; falling back to Stop hook result", {
+        error: (err as Error).message,
+      });
       return;
     }
     stdoutLine({
@@ -998,10 +1059,28 @@ async function startTranscriptTail(): Promise<void> {
     return;
   }
   const projectFolder = projectFolderFromTranscript(transcriptPath);
+  transcriptProjectFolder = projectFolder;
   stdoutLine({ type: "transcript_folder", path: projectFolder });
   const sessionId = sessionIdFromPath(transcriptPath);
   transcriptSessionId = sessionId;
   stdoutLine({ type: "transcript_open", path: transcriptPath, session_id: sessionId });
+  if (compatStreamJsonPrint) {
+    await tailTranscriptLines(
+      transcriptPath,
+      (line: string) => {
+        let row: TranscriptRow;
+        try {
+          row = JSON.parse(line) as TranscriptRow;
+        } catch {
+          row = { type: "bridge_parse_error", line };
+        }
+        handleTranscriptRow(row, line);
+        emitClaudeStreamRow(row);
+      },
+      ctrl.signal
+    );
+    return;
+  }
   await tailTranscript(
     transcriptPath,
     (row: TranscriptRow, _index: number, rawLine: string) => handleTranscriptRow(row, rawLine),
@@ -1009,15 +1088,40 @@ async function startTranscriptTail(): Promise<void> {
   );
 }
 
-function handleTranscriptRow(row: TranscriptRow, rawLine: string): void {
-  if (printMode && printDone) return;
-  if (printMode && outputFormat === "stream-json" && !desplegaFormat) {
-    process.stdout.write(rawLine.endsWith("\n") ? rawLine : rawLine + "\n");
+async function waitForRuntimeTranscriptPath(timeoutMs: number): Promise<string | null> {
+  const startedAt = Date.now();
+  while (!ctrl.signal.aborted && Date.now() - startedAt < timeoutMs) {
+    const path = readRuntimeTranscriptPath();
+    if (path) return path;
+    await sleep(50);
   }
+  return null;
+}
+
+function readRuntimeTranscriptPath(): string | null {
+  if (!existsSync(transcriptEventPath)) return null;
+  try {
+    const event = JSON.parse(readFileSync(transcriptEventPath, "utf8")) as RuntimeStopEvent;
+    return typeof event.transcript_path === "string" && event.transcript_path
+      ? event.transcript_path
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function handleTranscriptRow(row: TranscriptRow, _rawLine: string): void {
+  if (printMode && printDone) return;
 
   stdoutLine({ type: "transcript", row });
 
   if (!printMode) return;
+
+  if (typeof row.version === "string" && row.version) claudeVersionFromTranscript = row.version;
+  if (row.type === "system" && row.subtype === "api_error") {
+    const status = apiErrorStatusFromRow(row);
+    if (status != null) lastApiErrorStatus = status;
+  }
 
   const type = String(row.type ?? "");
   if (type === "assistant") {
@@ -1030,7 +1134,7 @@ function handleTranscriptRow(row: TranscriptRow, rawLine: string): void {
     return;
   }
 
-  if (type === "system" && row.subtype === "turn_duration") {
+  if (isTurnDurationRow(row)) {
     if (typeof row.durationMs === "number") lastTurnDurationMs = row.durationMs;
     if (!lastAssistantText) {
       pendingPrintFailure = {
@@ -1043,15 +1147,6 @@ function handleTranscriptRow(row: TranscriptRow, rawLine: string): void {
     return;
   }
 
-  // Handle `result` rows from Claude's `-p --output-format stream-json`.
-  // These appear in print-mode stdout but not in interactive transcripts.
-  if (type === "result" && !printDone) {
-    if (typeof row.duration_ms === "number") lastTurnDurationMs = row.duration_ms;
-    const resultText = typeof row.result === "string" ? row.result : lastAssistantText;
-    if (resultText) {
-      pendingPrintResultText = resultText;
-    }
-  }
 }
 
 function textFromContent(content: unknown): string {
@@ -1115,7 +1210,6 @@ let paneCaptured = false;
 function shutdown(exitCode = 0): void {
   if (shuttingDown) return;
   shuttingDown = true;
-  clearPrintTimers();
   ctrl.abort();
   if (!paneCaptured && exitCode !== 0) {
     captureFailurePane();
@@ -1125,6 +1219,5 @@ function shutdown(exitCode = 0): void {
 }
 
 desplegaDebug("run state created", { runDir });
-startPrintReadyTimer();
 startTmux();
 if (!printMode) startRepl();

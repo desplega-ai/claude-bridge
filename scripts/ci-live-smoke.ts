@@ -15,10 +15,7 @@ type BridgeResult = {
   raw_response?: string;
   structured_output?: unknown;
 };
-type TranscriptRow = Record<string, unknown> & {
-  type?: string;
-  message?: { content?: unknown };
-};
+type TranscriptRow = Record<string, unknown> & { type?: string };
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..");
@@ -91,8 +88,6 @@ env.TERM = "xterm-256color";
 if (!localAuth) {
   env.CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR ?? `${process.env.HOME}/.claude`;
 }
-env.CLAUDE_BRIDGE_PRINT_READY_TIMEOUT_MS =
-  process.env.CLAUDE_BRIDGE_PRINT_READY_TIMEOUT_MS ?? "240000";
 env.CLAUDE_BRIDGE_CLAUDE_READY_TIMEOUT_MS =
   process.env.CLAUDE_BRIDGE_CLAUDE_READY_TIMEOUT_MS ?? "240000";
 env.CLAUDE_BRIDGE_TMUX_SUBMIT_DELAY_MS =
@@ -136,7 +131,7 @@ function validateSmoke(stdout: string): void {
   }
 
   if (outputFormat === "stream-json" && !desplegaFormat) {
-    validateRawTranscriptStream(stdout);
+    validateClaudeCompatStream(stdout);
     return;
   }
 
@@ -209,45 +204,99 @@ function parseBridgeStreamResult(stdout: string): BridgeResult {
   return final;
 }
 
-function validateRawTranscriptStream(stdout: string): void {
+function validateClaudeCompatStream(stdout: string): void {
+  // Interactive-only transcript wrapper keys that must NOT leak into claude -p
+  // compatible assistant/user events. (Declared here, not at module scope, to
+  // avoid a temporal-dead-zone error: validateSmoke runs before module consts.)
+  const INTERACTIVE_WRAPPER_KEYS = [
+    "cwd",
+    "gitBranch",
+    "sessionId",
+    "requestId",
+    "timestamp",
+    "version",
+    "isSidechain",
+    "parentUuid",
+    "entrypoint",
+    "userType",
+  ];
   const rows = parseTranscriptRows(stdout);
-  const bridgeEnvelope = rows.find(row => row.type === "transcript" && "row" in row);
-  if (bridgeEnvelope) {
-    throw new Error("Expected raw Claude transcript rows, got a bridge transcript envelope.");
-  }
-  const assistantText = rows
-    .filter(row => row.type === "assistant")
-    .map(row => textFromContent(row.message?.content).trim())
-    .filter(Boolean)
-    .at(-1);
-  if (!assistantText) throw new Error("Expected an assistant transcript row in stream-json output.");
 
+  // No bridge-owned synthetic delta rows.
+  const syntheticDelta = rows.find(row => "delta" in row || "final" in row || "index" in row);
+  if (syntheticDelta) {
+    throw new Error(`Expected claude -p compatible stream, got synthesized delta row: ${JSON.stringify(syntheticDelta)}`);
+  }
+
+  // Only claude -p event types; system rows must be init or a surfaced
+  // api_error / model_refusal_fallback. This rejects interactive-only rows
+  // (last-prompt, mode, permission-mode, attachment, ai-title,
+  // stop_hook_summary, turn_duration, hook_*, local_command, ...).
+  const allowedSystem = new Set(["init", "api_error", "model_refusal_fallback"]);
+  for (const row of rows) {
+    const type = row.type;
+    if (type === "system") {
+      if (!allowedSystem.has(String(row.subtype))) {
+        throw new Error(`Unexpected interactive-only system row in claude -p stream: ${JSON.stringify(row)}`);
+      }
+      continue;
+    }
+    if (type !== "assistant" && type !== "user" && type !== "result") {
+      throw new Error(`Unexpected interactive-only row type "${String(type)}" in claude -p stream.`);
+    }
+  }
+
+  if (rows[0]?.type !== "system" || rows[0]?.subtype !== "init") {
+    throw new Error(`Expected the first event to be system/init, got: ${JSON.stringify(rows[0])}`);
+  }
+
+  const assistant = rows.find(row => row.type === "assistant");
+  if (!assistant) throw new Error("Expected an assistant event in claude -p stream-json output.");
+  if (!("session_id" in assistant) || !("parent_tool_use_id" in assistant)) {
+    throw new Error(`Assistant event missing claude -p wrapper fields: ${JSON.stringify(Object.keys(assistant))}`);
+  }
+  const leaked = INTERACTIVE_WRAPPER_KEYS.filter(key => key in assistant);
+  if (leaked.length) {
+    throw new Error(`Assistant event leaked interactive wrapper fields: ${leaked.join(", ")}`);
+  }
+
+  const result = rows[rows.length - 1];
+  if (result?.type !== "result") {
+    throw new Error(`Expected the terminal event to be a result, got: ${JSON.stringify(result)}`);
+  }
+  if (result.is_error) throw new Error(`Result event reported an error: ${JSON.stringify(result)}`);
+  if (typeof result.total_cost_usd !== "number" || (result.total_cost_usd as number) <= 0) {
+    throw new Error(`Expected a positive computed total_cost_usd, got: ${JSON.stringify(result.total_cost_usd)}`);
+  }
+
+  const text = assistantText(assistant).trim();
   if (schema) {
-    validateStructuredOutput(JSON.parse(assistantText));
+    validateStructuredOutput(JSON.parse(text));
     return;
   }
-  if (!assistantText.toLowerCase().includes("bridge-ok")) {
-    throw new Error(`Expected assistant transcript text to include bridge-ok, got: ${JSON.stringify(assistantText)}`);
+  if (!text.toLowerCase().includes("bridge-ok")) {
+    throw new Error(`Expected stream text to include bridge-ok, got: ${JSON.stringify(text)}`);
   }
 }
 
 function parseTranscriptRows(stdout: string): TranscriptRow[] {
   const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
-  if (lines.length === 0) throw new Error("Expected stream-json transcript rows, got empty stdout.");
+  if (lines.length === 0) throw new Error("Expected native stream-json transcript rows, got empty stdout.");
   return lines.map(line => JSON.parse(line) as TranscriptRow);
 }
 
-function textFromContent(content: unknown): string {
+function assistantText(row: TranscriptRow): string {
+  const message = row.message as { content?: unknown } | undefined;
+  const content = message?.content;
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
     .map(part => {
       if (!part || typeof part !== "object") return "";
-      const block = part as Record<string, unknown>;
-      return block.type === "text" ? String(block.text ?? "") : "";
+      const candidate = part as { text?: unknown };
+      return typeof candidate.text === "string" ? candidate.text : "";
     })
-    .filter(Boolean)
-    .join("\n");
+    .join("");
 }
 
 function dumpFailure(reason: string, stdout: string, stderr: string): never {

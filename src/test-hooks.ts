@@ -4,11 +4,14 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   JSON_SCHEMA_STOP_HOOK_ARG,
+  RUNTIME_HOOK_ARG,
   buildJsonSchemaStopHookCommand,
+  buildRuntimeHookCommand,
   installJsonSchemaStopHook,
+  installRuntimeHooks,
   uninstallJsonSchemaStopHook,
 } from "./hook-install.ts";
-import { evaluateJsonSchemaStopHook } from "./stop-hook.ts";
+import { evaluateJsonSchemaStopHook, recordRuntimeHook } from "./stop-hook.ts";
 
 const ok = (label: string, cond: boolean) => {
   console.log((cond ? "PASS" : "FAIL") + " " + label);
@@ -18,10 +21,12 @@ const ok = (label: string, cond: boolean) => {
 const workdir = mkdtempSync(join(tmpdir(), "bridge-hooks-"));
 const settingsPath = join(workdir, "settings.json");
 const command = buildJsonSchemaStopHookCommand(["bun", "src/cli.ts"]);
+const runtimeCommand = buildRuntimeHookCommand(["bun", "src/cli.ts"]);
 
 ok("hook command uses bun for source entry", command.startsWith("'bun' "));
 ok("hook command includes full cli path", command.includes(resolve(process.cwd(), "src/cli.ts")));
 ok("hook command includes internal marker", command.includes(JSON_SCHEMA_STOP_HOOK_ARG));
+ok("runtime hook command includes internal marker", runtimeCommand.includes(RUNTIME_HOOK_ARG));
 
 writeFileSync(
   settingsPath,
@@ -67,6 +72,25 @@ ok("uninstall removes one bridge hook", uninstalled.removed === 1);
 settings = JSON.parse(readFileSync(settingsPath, "utf8")) as any;
 ok("uninstall preserves existing stop hook", JSON.stringify(settings.hooks.Stop).includes("echo keep"));
 ok("uninstall preserves non-stop hooks", JSON.stringify(settings.hooks.PreToolUse).includes("echo other"));
+
+const runtimeInstalled = installRuntimeHooks({ settingsPath, command: runtimeCommand });
+ok("runtime install reports changed first time", runtimeInstalled.changed);
+settings = JSON.parse(readFileSync(settingsPath, "utf8")) as any;
+ok("runtime install adds Stop hook", countHooks(settings, "Stop", RUNTIME_HOOK_ARG) === 1);
+ok("runtime install adds StopFailure hook", countHooks(settings, "StopFailure", RUNTIME_HOOK_ARG) === 1);
+ok("runtime install adds MessageDisplay hook", countHooks(settings, "MessageDisplay", RUNTIME_HOOK_ARG) === 1);
+ok("runtime install adds UserPromptSubmit hook", countHooks(settings, "UserPromptSubmit", RUNTIME_HOOK_ARG) === 1);
+ok("runtime install adds SessionStart hook", countHooks(settings, "SessionStart", RUNTIME_HOOK_ARG) === 1);
+ok("runtime install adds PreToolUse hook", countHooks(settings, "PreToolUse", RUNTIME_HOOK_ARG) === 1);
+const runtimeInstalledAgain = installRuntimeHooks({ settingsPath, command: runtimeCommand });
+ok("runtime install is idempotent", !runtimeInstalledAgain.changed);
+settings = JSON.parse(readFileSync(settingsPath, "utf8")) as any;
+ok("runtime idempotent install keeps one Stop hook", countHooks(settings, "Stop", RUNTIME_HOOK_ARG) === 1);
+ok("runtime idempotent install keeps one StopFailure hook", countHooks(settings, "StopFailure", RUNTIME_HOOK_ARG) === 1);
+ok("runtime idempotent install keeps one MessageDisplay hook", countHooks(settings, "MessageDisplay", RUNTIME_HOOK_ARG) === 1);
+ok("runtime idempotent install keeps one UserPromptSubmit hook", countHooks(settings, "UserPromptSubmit", RUNTIME_HOOK_ARG) === 1);
+ok("runtime idempotent install keeps one SessionStart hook", countHooks(settings, "SessionStart", RUNTIME_HOOK_ARG) === 1);
+ok("runtime idempotent install keeps one PreToolUse hook", countHooks(settings, "PreToolUse", RUNTIME_HOOK_ARG) === 1);
 
 const staleSettingsPath = join(workdir, "stale-settings.json");
 writeFileSync(
@@ -159,6 +183,57 @@ writeFileSync(
 const maxedDecision = evaluateJsonSchemaStopHook(stopInput(maxedTranscript), env);
 ok("stop hook stops blocking after bounded retries", maxedDecision === null);
 
+const runtimeDir = join(workdir, "runtime");
+const runtimeEnv = {
+  CLAUDE_BRIDGE_RUNTIME_HOOK: "1",
+  CLAUDE_BRIDGE_RUN_DIR: runtimeDir,
+};
+recordRuntimeHook(
+  JSON.stringify({ hook_event_name: "MessageDisplay", delta: "hello" }),
+  runtimeEnv
+);
+recordRuntimeHook(
+  JSON.stringify({ hook_event_name: "UserPromptSubmit", transcript_path: "/tmp/session.jsonl" }),
+  runtimeEnv
+);
+recordRuntimeHook(
+  JSON.stringify({
+    hook_event_name: "Stop",
+    transcript_path: "/tmp/session.jsonl",
+    last_assistant_message: "hello",
+  }),
+  runtimeEnv
+);
+ok("runtime hook records message display jsonl", readFileSync(join(runtimeDir, "message-display.jsonl"), "utf8").includes("hello"));
+ok("runtime hook records early transcript event", JSON.parse(readFileSync(join(runtimeDir, "transcript-event.json"), "utf8")).hook_event_name === "UserPromptSubmit");
+ok("runtime hook records stop event", JSON.parse(readFileSync(join(runtimeDir, "stop-event.json"), "utf8")).last_assistant_message === "hello");
+
+const blockedRuntimeDir = join(workdir, "runtime-blocked");
+recordRuntimeHook(
+  stopInput(invalidTranscript),
+  {
+    ...runtimeEnv,
+    CLAUDE_BRIDGE_RUN_DIR: blockedRuntimeDir,
+    CLAUDE_BRIDGE_SCHEMA_STOP_HOOK: "1",
+    CLAUDE_BRIDGE_JSON_SCHEMA_PATH: schemaPath,
+  }
+);
+let blockedStopRecorded = true;
+try {
+  readFileSync(join(blockedRuntimeDir, "stop-event.json"), "utf8");
+} catch {
+  blockedStopRecorded = false;
+}
+ok("runtime hook ignores schema-blocked Stop events", !blockedStopRecorded);
+
+const failureRuntimeDir = join(workdir, "runtime-failure");
+recordRuntimeHook(
+  JSON.stringify({ hook_event_name: "StopFailure", message: "rate limited" }),
+  { ...runtimeEnv, CLAUDE_BRIDGE_RUN_DIR: failureRuntimeDir }
+);
+const failureEvent = JSON.parse(readFileSync(join(failureRuntimeDir, "stop-event.json"), "utf8")) as any;
+ok("runtime hook records StopFailure event", failureEvent.hook_event_name === "StopFailure");
+
 try { rmSync(workdir, { recursive: true, force: true }); } catch {}
 
 console.log("\nresult: " + (process.exitCode ? "FAIL" : "PASS"));
@@ -174,11 +249,15 @@ function assistantRow(text: string): string {
 }
 
 function countBridgeHooks(settings: any): number {
-  return (settings.hooks?.Stop ?? []).reduce(
+  return countHooks(settings, "Stop", JSON_SCHEMA_STOP_HOOK_ARG);
+}
+
+function countHooks(settings: any, event: string, marker: string): number {
+  return (settings.hooks?.[event] ?? []).reduce(
     (count: number, group: any) =>
       count +
       (group.hooks ?? []).filter((hook: any) =>
-        String(hook.command ?? "").includes(JSON_SCHEMA_STOP_HOOK_ARG)
+        String(hook.command ?? "").includes(marker)
       ).length,
     0
   );
