@@ -250,7 +250,8 @@ function validateClaudeCompatStream(stdout: string): void {
     throw new Error(`Expected the first event to be system/init, got: ${JSON.stringify(rows[0])}`);
   }
 
-  const assistant = rows.find(row => row.type === "assistant");
+  const assistantRows = rows.filter(row => row.type === "assistant");
+  const assistant = assistantRows[0];
   if (!assistant) throw new Error("Expected an assistant event in claude -p stream-json output.");
   if (!("session_id" in assistant) || !("parent_tool_use_id" in assistant)) {
     throw new Error(`Assistant event missing claude -p wrapper fields: ${JSON.stringify(Object.keys(assistant))}`);
@@ -269,8 +270,15 @@ function validateClaudeCompatStream(stdout: string): void {
     throw new Error(`Expected a positive computed total_cost_usd, got: ${JSON.stringify(result.total_cost_usd)}`);
   }
 
-  const text = assistantText(assistant).trim();
+  // Concatenate text across all assistant events. With extended thinking the
+  // model emits a separate thinking-only assistant row before the text row, so
+  // the first assistant event can carry no text — reading only that row gave
+  // JSON.parse("") → "Unexpected EOF" for the schema case.
+  const text = assistantRows.map(assistantText).join("").trim();
   if (schema) {
+    if (!text) {
+      throw new Error("Expected assistant text for schema validation, got none.");
+    }
     validateStructuredOutput(JSON.parse(text));
     return;
   }

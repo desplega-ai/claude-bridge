@@ -34,5 +34,18 @@ ok("local auth forwards ANTHROPIC_MODEL", localArgs.includes("ANTHROPIC_MODEL=cl
 ok("local auth still clears stale tmux Anthropic env first", claudeUnsetEnvArgs().includes("ANTHROPIC_API_KEY"));
 ok("local auth does not forward unrelated env", !localArgs.some(arg => arg.startsWith("OTHER_AUTHISH_ENV=")));
 
+// The bridge depends on Claude's on-disk transcript for metrics + streamed
+// events; CLAUDE_CODE_SKIP_PROMPT_HISTORY=1 (set by agent-swarm#644) suppresses
+// it, so the bridge must always unset it when launching claude.
+const unsetArgs = claudeUnsetEnvArgs();
+ok(
+  "unsets CLAUDE_CODE_SKIP_PROMPT_HISTORY (transcript-breaking)",
+  unsetArgs.includes("CLAUDE_CODE_SKIP_PROMPT_HISTORY"),
+);
+ok(
+  "each unset name is preceded by -u",
+  unsetArgs.every((arg, i) => arg === "-u" || unsetArgs[i - 1] === "-u"),
+);
+
 console.log("\nresult: " + (process.exitCode ? "FAIL" : "PASS"));
 process.exit(process.exitCode ?? 0);
